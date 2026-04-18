@@ -259,9 +259,14 @@ usr_data = get_user_data(st.session_state.get('username', ''))
 u_key = usr_data.get('binance_api_key', '')
 u_sec = usr_data.get('binance_secret', '')
 
-# Modify Demo Mode dynamically if keys exist
-has_keys = bool(u_key and u_sec)
+# Modify Demo Mode dynamically if keys exist (User Profile OR Global Env)
+has_keys = bool(u_key and u_sec) or bool(config.BINANCE_API_KEY and config.BINANCE_SECRET)
 config.DEMO_MODE = not has_keys
+
+# Si usamos llaves globales, las pasamos a la conexión
+if not bool(u_key and u_sec) and not config.DEMO_MODE:
+    u_key = config.BINANCE_API_KEY
+    u_sec = config.BINANCE_SECRET
 
 def fetch_data():
     ex = st.session_state.exchange
