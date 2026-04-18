@@ -1,32 +1,25 @@
-# Usar una imagen de Python ligera
+# Imagen base oficial de Python ligera
 FROM python:3.12-slim
 
-# Evitar que Python genere archivos .pyc y forzar logs en tiempo real
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-# Configurar directorio de trabajo
 WORKDIR /app
 
-# Instalar dependencias del sistema necesarias para TA-Lib o compilaciones
+# Dependencias mínimas del sistema
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    software-properties-common \
     && rm -rf /var/lib/apt/lists/*
 
-# Copiar requerimientos e instalar (Caché optimizado)
+# Copiar e instalar dependencias primero (cache eficiente)
 COPY requirements.txt .
-
-# Instalación de dependencias (Incluyendo las visuales para el Dashboard)
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir streamlit plotly streamlit-autorefresh
 
-# Copiar el resto del proyecto
+# Copiar el resto del código
 COPY . .
 
-# Railway usa la variable de entorno $PORT. Configuramos Streamlit para usarla.
-EXPOSE 8501
-
-# Comando para arrancar el Dashboard en el puerto dinámico de Railway
-CMD ["sh", "-c", "streamlit run web_dashboard.py --server.port ${PORT:-8501} --server.address 0.0.0.0"]
+# Railway inyecta dinámicamente la variable PORT. 
+# Usamos el formato Shell de CMD para que pueda leer las variables de entorno.
+CMD streamlit run web_dashboard.py \
+    --server.port=${PORT:-8501} \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --browser.gatherUsageStats=false
