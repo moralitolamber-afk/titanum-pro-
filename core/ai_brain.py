@@ -9,6 +9,10 @@ import time
 import asyncio
 import feedparser
 from groq import Groq
+from dotenv import load_dotenv
+
+# Cargar .env para obtener GROQ_API_KEY
+load_dotenv()
 
 # Configuración RSS
 RSS_FEEDS = [
@@ -39,7 +43,7 @@ class AIBrain:
         if (now - self.sentiment_state["last_check"]) < 300:
             return self.sentiment_state
 
-        print("🧠 [AI BRAIN] Descargando últimas noticias mundiales...")
+        print("[AI BRAIN] Descargando últimas noticias mundiales...")
         
         # 1. Obtener titulares
         headlines = []
@@ -77,13 +81,13 @@ Responde ÚNICAMENTE con un JSON válido usando esta estructura estructural (sin
 }}
 """
         try:
-            # Usar llama3-8b-8192 o llama3-70b-8192 por su velocidad brutal
+            # Usar llama-3.3-70b-versatile para máxima precisión y velocidad
             completion = self.client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": "You are a helpful JSON-only output assistant."},
                     {"role": "user", "content": prompt}
                 ],
-                model="llama3-8b-8192",
+                model="llama-3.3-70b-versatile",
                 temperature=0.0,
                 max_tokens=200,
             )
@@ -103,6 +107,7 @@ Responde ÚNICAMENTE con un JSON válido usando esta estructura estructural (sin
             self.sentiment_state["last_check"] = now
             
         except Exception as e:
+            print(f"[AI ERROR] {str(e)}")
             self.sentiment_state["reason"] = f"Error IA: {str(e)[:30]}"
             
         return self.sentiment_state
