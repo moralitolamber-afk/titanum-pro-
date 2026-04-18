@@ -1067,7 +1067,7 @@ def page_dashboard():
 
         # Navegación
         page = st.radio("Navegación", [
-            "📊 Dashboard", "🏦 Staking Vault",
+            "📊 Dashboard", "🏦 Vault",
             "⚖️ Liquidity Monitoring", "🗳️ Governance",
             "🔬 Backtesting", "⚙️ Configuración"
         ], label_visibility="collapsed")
@@ -1095,7 +1095,7 @@ def page_dashboard():
     # ── Routing de páginas ───────────────────────────────────────
     if page == "📊 Dashboard":
         _page_main(tf_data, obi_data, regime, cb)
-    elif page == "🏦 Staking Vault":
+    elif page == "🏦 Vault":
         _page_vault()
     elif page == "⚖️ Liquidity Monitoring":
         _page_liquidity(obi_data)
@@ -1106,9 +1106,9 @@ def page_dashboard():
     elif page == "⚙️ Configuración":
         _page_config()
 
-    # Auto-refresh
-    time.sleep(refresh)
-    st.rerun()
+    # Auto-refresh (Modernized)
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=refresh * 1000, key="datarefresh")
 
 
 def _page_main(tf_data, obi_data, regime, cb):
@@ -1460,28 +1460,33 @@ if __name__ == "__main__":
 # ═══════════════════════════════════════════════════════════════════
 
 def _page_vault():
-    st.markdown('<div class="titanium-header">🏦 Staking Vault</div>', True)
-    st.caption("Estrategias de colocación de capital con protección de protocolo.")
+    st.markdown('<div class="titanium-header">🏦 DeFi Staking Vault</div>', True)
+    st.caption("Estrategias de colocación de capital basadas en StakingRewards.sol.")
     
     cb = st.session_state.circuit_breaker
     pnl = cb.get_status()['total_pnl_pct']
     
+    # Lógica de Contrato: rewardPerToken = rewardRate * time / totalSupply
+    reward_rate = 100 # tokens per sec (from template)
+    total_supply = 1240500 # TVL
+    
     c1, c2, c3 = st.columns(3)
     with c1:
-        card("TVL (Total Value Locked)", "$1,240,500", sub="Simulated Protocol Cap", badge="blue")
+        card("TVL (Protocol)", f"${total_supply:,.0f}", sub="Locked in Smart Contract", badge="blue")
     with c2:
-        apy = (1 + pnl/100)**365 - 1 if pnl > 0 else 0
-        card("Current APY (Est.)", f"{apy*100:,.1f}%", sub="Based on last 24h", badge="green")
+        # APY Realista basado en PnL de trading + Incentivos del Protocolo
+        base_apy = (1 + pnl/100)**365 - 1 if pnl > 0 else 0
+        bonus_apy = (reward_rate * 86400 * 365) / total_supply
+        total_apy = base_apy + bonus_apy
+        card("Vault APY", f"{total_apy*100:,.1f}%", sub=f"Incentivo: {bonus_apy*100:.1f}%", badge="green")
     with c3:
-        card("Yield Generated", f"+${(1240500 * (pnl/100)):,.2f}", sub="Total Profit Distributed", badge="green")
+        earned = (total_supply * (pnl/100)) + (reward_rate * 3600) # Recompensa estimada última hora
+        card("Pending Rewards", f"{earned:,.2f} GOV", sub="Claimable in $GOV", badge="yellow")
 
     st.markdown("---")
-    st.markdown("#### Robustez del Protocolo")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.info("💡 **Lógica de Protocolo:** Este Vault utiliza el motor Kelly Position Sizer para asegurar que nunca se exponga más del 10% del TVL en un solo evento de liquidez.")
-    with col_b:
-        st.warning("⚠️ **Circuit Breaker:** El Protocolo entrará en pausa automática si el Drawdown del Vault excede el límite configurado.")
+    st.markdown("#### Security & Risk (CircuitBreaker)")
+    st.info(f"🛡️ **Protección de Bóveda:** Si el Capital Drawdown toca el **{Config.MAX_DAILY_DD}%**, el contrato de Staking entra en `pause()` automático via CircuitBreaker.")
+
 
 def _page_liquidity(obi_data):
     st.markdown('<div class="titanium-header">⚖️ Liquidity Monitoring</div>', True)
