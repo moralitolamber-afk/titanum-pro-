@@ -66,6 +66,26 @@ class ExchangeManager:
             print(f"[ExchangeManager] Error inesperado en {tf}: {e}")
             return self._cache.get(tf, pd.DataFrame())
 
+    def fetch_obi(self, depth: int = 20) -> dict:
+        """Fetch Order Book Imbalance (bid vs ask pressure)."""
+        if config.DEMO_MODE or not self.exchange:
+            # Retorna datos simulados en modo demo
+            return {'obi': 0.0, 'bids_vol': 0.0, 'asks_vol': 0.0}
+        try:
+            ob = self.exchange.fetch_order_book(config.SYMBOL, limit=depth)
+            bids_vol = sum(b[1] for b in ob['bids'])
+            asks_vol = sum(a[1] for a in ob['asks'])
+            total = bids_vol + asks_vol
+            obi = (bids_vol - asks_vol) / total if total > 0 else 0.0
+            return {
+                'obi': round(obi, 4),
+                'bids_vol': round(bids_vol, 2),
+                'asks_vol': round(asks_vol, 2)
+            }
+        except Exception as e:
+            print(f"[fetch_obi] Error: {e}")
+            return {'obi': 0.0, 'bids_vol': 0.0, 'asks_vol': 0.0}
+
     def fetch_all_timeframes(self) -> dict:
         """
         Fetch paralelo — funciona en Vercel SOLO si el timeout no se excede.
