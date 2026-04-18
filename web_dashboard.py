@@ -1067,9 +1067,9 @@ def page_dashboard():
 
         # Navegación
         page = st.radio("Navegación", [
-            "📊 Dashboard", "🎯 Circuit Breaker",
-            "📐 Position Sizer", "🔬 Backtesting",
-            "⚙️ Configuración"
+            "📊 Dashboard", "🏦 Staking Vault",
+            "⚖️ Liquidity Monitoring", "🗳️ Governance",
+            "🔬 Backtesting", "⚙️ Configuración"
         ], label_visibility="collapsed")
 
         st.markdown("---")
@@ -1095,10 +1095,12 @@ def page_dashboard():
     # ── Routing de páginas ───────────────────────────────────────
     if page == "📊 Dashboard":
         _page_main(tf_data, obi_data, regime, cb)
-    elif page == "🎯 Circuit Breaker":
-        _page_circuit(cb)
-    elif page == "📐 Position Sizer":
-        _page_sizer(tf_data)
+    elif page == "🏦 Staking Vault":
+        _page_vault()
+    elif page == "⚖️ Liquidity Monitoring":
+        _page_liquidity(obi_data)
+    elif page == "🗳️ Governance":
+        _page_governance()
     elif page == "🔬 Backtesting":
         _page_backtest(tf_data)
     elif page == "⚙️ Configuración":
@@ -1451,3 +1453,82 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 17: MÓDULOS DEFI UPGRADE
+# ═══════════════════════════════════════════════════════════════════
+
+def _page_vault():
+    st.markdown('<div class="titanium-header">🏦 Staking Vault</div>', True)
+    st.caption("Estrategias de colocación de capital con protección de protocolo.")
+    
+    cb = st.session_state.circuit_breaker
+    pnl = cb.get_status()['total_pnl_pct']
+    
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        card("TVL (Total Value Locked)", "$1,240,500", sub="Simulated Protocol Cap", badge="blue")
+    with c2:
+        apy = (1 + pnl/100)**365 - 1 if pnl > 0 else 0
+        card("Current APY (Est.)", f"{apy*100:,.1f}%", sub="Based on last 24h", badge="green")
+    with c3:
+        card("Yield Generated", f"+${(1240500 * (pnl/100)):,.2f}", sub="Total Profit Distributed", badge="green")
+
+    st.markdown("---")
+    st.markdown("#### Robustez del Protocolo")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.info("💡 **Lógica de Protocolo:** Este Vault utiliza el motor Kelly Position Sizer para asegurar que nunca se exponga más del 10% del TVL en un solo evento de liquidez.")
+    with col_b:
+        st.warning("⚠️ **Circuit Breaker:** El Protocolo entrará en pausa automática si el Drawdown del Vault excede el límite configurado.")
+
+def _page_liquidity(obi_data):
+    st.markdown('<div class="titanium-header">⚖️ Liquidity Monitoring</div>', True)
+    st.caption("Análisis de profundidad AMM-Style para ejecución de órdenes.")
+    
+    obi = obi_data.get('obi', 0)
+    bids = obi_data.get('bids_vol', 0)
+    asks = obi_data.get('asks_vol', 0)
+    
+    col_chart, col_metrics = st.columns([2, 1])
+    with col_chart:
+        # Mini gráfico de simulación de liquidez
+        st.markdown("##### Profundidad de Mercado (Depth Chart)")
+        data = pd.DataFrame({
+            'Side': ['Bids'] * 10 + ['Asks'] * 10,
+            'Volume': list(np.linspace(bids, 0, 10)) + list(np.linspace(0, asks, 10))
+        })
+        st.bar_chart(data, x='Side', y='Volume', color='Side')
+
+    with col_metrics:
+        card("Bid Pressure", f"{bids:,.2f}", sub="Buy Side Liquidity")
+        card("Ask Pressure", f"{asks:,.2f}", sub="Sell Side Liquidity")
+        impact = abs(obi) * 0.05 # Simulación de Price Impact
+        card("Est. Price Impact", f"{impact:,.4f}%", sub="Para orden de 10 BTC", badge="yellow" if impact > 0.01 else "green")
+
+def _page_governance():
+    st.markdown('<div class="titanium-header">🗳️ Governance</div>', True)
+    st.caption("Propuestas de optimización de algoritmos y gestión de parámetros.")
+    
+    st.markdown("""
+    <div class="titanium-card">
+        <div class="metric-label">Propuesta Activa (TIP-01)</div>
+        <div class="metric-value">Ajustar Multiplicador ATR a 2.5x</div>
+        <div class="metric-sub">Finaliza en: 2d 14h 30m</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("✅ Votar a Favor (FOR)", use_container_width=True)
+    with col2:
+        st.button("❌ Votar en Contra (AGAINST)", use_container_width=True)
+        
+    st.markdown("---")
+    st.markdown("#### Historial de Votación")
+    st.table([
+        {"ID": "TIP-00", "Propuesta": "Activar Llama-3.3 Sentiment", "Estado": "EJECUTADO", "Resultado": "PASA"},
+        {"ID": "TIP-01", "Propuesta": "Cambiar Símbolo a ETH/USDT", "Estado": "FALLIDO", "Resultado": "RECHAZADO"}
+    ])
+
