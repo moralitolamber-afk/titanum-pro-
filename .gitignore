@@ -1,0 +1,24 @@
+# Secretos y APIs
+.env
+users_db.json
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+#.venv/
+#env/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Logs y datos locales
+*.log
+*.csv
+data/
+node_modules/
+.venv/
+env/
+
