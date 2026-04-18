@@ -622,7 +622,17 @@ class ExchangeManager:
         lows   = closes * np.random.uniform(0.995, 0.999, n)
         opens  = np.roll(closes, 1)
         opens[0] = closes[0]
-        idx = pd.date_range(end=datetime.now(), periods=n, freq=tf)
+        
+        # Convertir TF de ccxt a pandas-compatible
+        freq_map = {
+            '1m': '1min',  '3m': '3min',  '5m': '5min',  '15m': '15min',
+            '30m': '30min', '1h': '1h',    '2h': '2h',    '4h': '4h',
+            '6h': '6h',     '8h': '8h',    '12h': '12h',  '1d': '1D',
+            '3d': '3D',     '1w': '1W',    '1M': '1ME'
+        }
+        pd_freq = freq_map.get(tf, '5min')  # Default 5min si no existe
+        idx = pd.date_range(end=datetime.now(), periods=n, freq=pd_freq)
+        
         return pd.DataFrame({
             'open': opens, 'high': highs,
             'low': lows,   'close': closes,
