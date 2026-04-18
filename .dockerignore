@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+users_db.json
+data/
+node_modules/
+.git/
+.claude/
+.vercel/
+*.log

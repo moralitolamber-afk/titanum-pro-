@@ -53,14 +53,27 @@ def authenticate_user(username: str, password: str) -> tuple[bool, str]:
         
     return True, "✅ Acceso concedido."
 
+from core.secure_vault import SecureVault
+
+vault = None
+try:
+    vault = SecureVault()
+except Exception as e:
+    print(f"Warning: SecureVault not initialized: {e}")
+
 def update_api_keys(username: str, api_key: str, api_secret: str) -> bool:
-    db = _load_db()
-    if username in db["users"]:
-        db["users"][username]["binance_api_key"] = api_key
-        db["users"][username]["binance_secret"] = api_secret
-        _save_db(db)
+    if not vault:
+        return False
+    try:
+        vault.store(username, api_key, api_secret)
         return True
-    return False
+    except:
+        return False
+
+def get_keys(username: str) -> tuple[str, str]:
+    if not vault:
+        return "", ""
+    return vault.retrieve(username)
 
 def get_user_data(username: str) -> dict:
     db = _load_db()
