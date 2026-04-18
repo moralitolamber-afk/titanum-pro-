@@ -40,24 +40,32 @@ class BotStatus(BaseModel):
 
 @app.get("/")
 def home():
-    return {"status": "Titanium Engine Active", "version": "8.0 PRO"}
+    return {"status": "Titanium Engine Active", "version": "10.0 PRO MAX"}
 
 @app.get("/api/market-data")
 def get_market_data():
     """Endpoint para que el Dashboard de Vercel/Next.js obtenga los datos."""
     try:
+        from portfolio.analyzer import PortfolioAnalyzer
+        from ai.sentiment import NewsAggregator
+        
         # Nota: En modo serverless, esto debe ser muy rápido.
         tf_data = manager.fetch_all_timeframes()
         ob_data = manager.fetch_obi()
+        
+        # News/Sentiment
+        news = NewsAggregator()
+        context = news.get_market_context()
         
         # Último precio
         last_price = tf_data[config.TF_ENTRY]['close'].iloc[-1]
         
         return {
             "symbol": config.SYMBOL,
+            "version": "10.0 PRO MAX",
             "price": float(last_price),
             "obi": float(ob_data['obi']),
-            "ai": brain.sentiment_state,
+            "sentiment": context,
             "breaker": breaker.get_status()
         }
     except Exception as e:
