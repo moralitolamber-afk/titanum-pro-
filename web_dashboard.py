@@ -1432,30 +1432,6 @@ MAX_POSITION_PCT=0.10  # máximo 10% del capital por trade
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SECCIÓN 16: MAIN
-# ═══════════════════════════════════════════════════════════════════
-
-def main():
-    st.set_page_config(
-        page_title    = "Titanium Pro v9",
-        page_icon     = "⚡",
-        layout        = "wide",
-        initial_sidebar_state = "expanded",
-    )
-    st.markdown(STYLES, unsafe_allow_html=True)
-    _init_session()
-
-    if not st.session_state.logged_in:
-        page_login()
-    else:
-        page_dashboard()
-
-
-if __name__ == "__main__":
-    main()
-
-
-# ═══════════════════════════════════════════════════════════════════
 # SECCIÓN 17: MÓDULOS DEFI UPGRADE
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1536,4 +1512,28 @@ def _page_governance():
         {"ID": "TIP-00", "Propuesta": "Activar Llama-3.3 Sentiment", "Estado": "EJECUTADO", "Resultado": "PASA"},
         {"ID": "TIP-01", "Propuesta": "Cambiar Símbolo a ETH/USDT", "Estado": "FALLIDO", "Resultado": "RECHAZADO"}
     ])
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 16: MAIN
+# ═══════════════════════════════════════════════════════════════════
+
+def main():
+    st.set_page_config(
+        page_title    = "Titanium Pro v9",
+        page_icon     = "⚡",
+        layout        = "wide",
+        initial_sidebar_state = "expanded",
+    )
+    st.markdown(STYLES, unsafe_allow_html=True)
+    _init_session()
+
+    if not st.session_state.logged_in:
+        page_login()
+    else:
+        page_dashboard()
+
+
+if __name__ == "__main__":
+    main()
 
