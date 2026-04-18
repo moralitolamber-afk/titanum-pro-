@@ -4,12 +4,10 @@ pandas_ta>=0.3.14b
 numpy>=1.24.0
 pytz>=2023.3
 rich>=13.0.0
-streamlit>=1.30.0
-streamlit-autorefresh>=1.0.1
-plotly>=5.18.0
 python-dotenv>=1.0.0
 groq>=0.4.0
 feedparser>=6.0.10
 fastapi>=0.100.0
 uvicorn>=0.23.0
+
 

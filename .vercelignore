@@ -1,0 +1,11 @@
+node_modules
+*.zip
+*.log
+*.csv
+data/
+backtest_results/
+screenshots/
+__pycache__
+web_dashboard.py
+backtest.py
+TITANIUM_V8_PRO_FULL.zip
