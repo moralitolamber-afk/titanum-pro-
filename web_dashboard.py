@@ -1,627 +1,1443 @@
 """
-⚡ TITANIUM v8.0 PRO — Web Dashboard (Streamlit)
-Interfaz web en tiempo real. Usa componentes nativos de Streamlit
-para evitar conflictos DOM con React.
-Se ejecuta con: streamlit run web_dashboard.py
+╔══════════════════════════════════════════════════════════════════╗
+║           TITANIUM v9.0 PRO — SISTEMA MAESTRO COMPLETO          ║
+║                                                                  ║
+║  Integra en UN solo archivo:                                     ║
+║  ✅ CircuitBreaker   — Protección contra pérdidas catastróficas  ║
+║  ✅ ATRRiskManager   — SL/TP dinámicos basados en volatilidad    ║
+║  ✅ KellyPositionSizer — Tamaño óptimo de posición               ║
+║  ✅ RegimeDetector   — Detecta tendencia/rango/volatilidad       ║
+║  ✅ CorrelationMonitor — Evita exposición duplicada              ║
+║  ✅ Backtester       — Valida estrategias antes de live          ║
+║  ✅ ExchangeManager  — Conexión Binance + OBI                    ║
+║  ✅ AIBrain          — Análisis con Groq/Llama                   ║
+║  ✅ Dashboard        — UI Streamlit premium con métricas         ║
+║                                                                  ║
+║  Deployable en Railway sin cambios adicionales.                  ║
+╚══════════════════════════════════════════════════════════════════╝
 """
-import sys
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 0: IMPORTS
+# ═══════════════════════════════════════════════════════════════════
+
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from datetime import datetime
-import pytz
 import time
-import asyncio
-from streamlit_autorefresh import st_autorefresh
+import json
+import hashlib
+import warnings
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Dict, List, Literal, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
 
-import config
-from core.exchange import ExchangeManager
-from core.indicators import calculate_all, get_trend_direction, get_macro_trend_direction
-from core.strategy import StrategyEngine
-from core.ai_brain import AIBrain
-from risk.circuit_breaker import CircuitBreaker
-from risk.position_sizer import KellyPositionSizer
-from core.auth_manager import authenticate_user, register_user, get_user_data, update_api_keys
+import numpy as np
+import pandas as pd
+import streamlit as st
 
-# ── PAGE CONFIG ──────────────────────────────────────────
-st.set_page_config(
-    page_title="TITANIUM v8.0 PRO",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+warnings.filterwarnings('ignore')
 
-# ── AUTH STATE ──────────────────────────────────────────
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
-if 'auth_mode' not in st.session_state:
-    st.session_state.auth_mode = 'login'
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 1: CONFIGURACIÓN MAESTRA
+# ═══════════════════════════════════════════════════════════════════
 
-if st.session_state.authenticated:
-    # Auto-refresh cada 4 segundos solo si está logueado
-    count = st_autorefresh(interval=4000, limit=None, key="titanium_refresh")
+class Config:
+    """Configuración centralizada. Lee desde Railway env vars."""
 
-# ── CSS (PREMIUM INSTITUTIONAL UI) ────────────────
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap');
-    
-    /* Global Typography & Colors */
-    * { font-family: 'Outfit', sans-serif; }
-    
-    .stApp { 
-        background: radial-gradient(circle at 50% -20%, #0c152a 0%, #030712 50%, #000000 100%);
-        color: #f8fafc;
+    # Trading
+    SYMBOL          = os.getenv("SYMBOL", "BTC/USDT")
+    USE_SPOT        = os.getenv("USE_SPOT", "true").lower() == "true"
+    TF_ENTRY        = os.getenv("TF_ENTRY", "5m")
+    TF_CONFIRM      = os.getenv("TF_CONFIRM", "15m")
+    TF_TREND        = os.getenv("TF_TREND", "1h")
+    CANDLE_LIMIT    = int(os.getenv("CANDLE_LIMIT", "200"))
+    DEMO_MODE       = True   # Se actualiza dinámicamente por sesión
+
+    # API Keys (cargadas desde Railway / .env)
+    GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
+    BINANCE_API_KEY  = os.getenv("BINANCE_API_KEY", "")
+    BINANCE_SECRET   = os.getenv("BINANCE_SECRET", "")
+    ADMIN_PASSKEY    = os.getenv("ADMIN_PASSKEY", "protrading")
+
+    # Risk — ajustables sin tocar código
+    MAX_DAILY_DD     = float(os.getenv("MAX_DAILY_DD", "5.0"))
+    MAX_TOTAL_DD     = float(os.getenv("MAX_TOTAL_DD", "15.0"))
+    EMERGENCY_STOP   = float(os.getenv("EMERGENCY_STOP", "-20.0"))
+    MAX_CONS_LOSSES  = int(os.getenv("MAX_CONS_LOSSES", "5"))
+    COOLDOWN_MIN     = int(os.getenv("COOLDOWN_MIN", "60"))
+    KELLY_FRACTION   = float(os.getenv("KELLY_FRACTION", "0.5"))
+    MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "0.10"))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 2: CIRCUIT BREAKER
+# ═══════════════════════════════════════════════════════════════════
+
+class CircuitBreaker:
+    """
+    Gateway obligatorio antes de ejecutar cualquier orden.
+    Protege el capital con 4 niveles de parada automática.
+    """
+
+    def __init__(self):
+        self.daily_pnl: float = 0.0
+        self.total_pnl: float = 0.0
+        self.consecutive_losses: int = 0
+        self.trading_paused: bool = False
+        self.pause_reason: Optional[str] = None
+        self.cooldown_until: Optional[datetime] = None
+        self._daily_reset = datetime.now().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+    def can_trade(self) -> bool:
+        self._maybe_reset_daily()
+        if self.trading_paused and self.cooldown_until:
+            if datetime.now() >= self.cooldown_until:
+                self.trading_paused = False
+                self.pause_reason = None
+                self.cooldown_until = None
+        return not self.trading_paused
+
+    def record_trade(self, pnl_pct: float):
+        self._maybe_reset_daily()
+        self.daily_pnl  += pnl_pct
+        self.total_pnl  += pnl_pct
+        self.consecutive_losses = self.consecutive_losses + 1 if pnl_pct < 0 else 0
+        self._check_breakers()
+
+    def get_status(self) -> Dict:
+        return {
+            "can_trade":          self.can_trade(),
+            "daily_pnl_pct":      round(self.daily_pnl, 2),
+            "total_pnl_pct":      round(self.total_pnl, 2),
+            "consecutive_losses": self.consecutive_losses,
+            "paused":             self.trading_paused,
+            "pause_reason":       self.pause_reason,
+        }
+
+    # ── privado ──────────────────────────────────────────────────
+
+    def _check_breakers(self):
+        if self.total_pnl <= Config.EMERGENCY_STOP:
+            self._pause(f"🚨 EMERGENCY: PnL {self.total_pnl:.1f}%", permanent=True)
+        elif self.daily_pnl <= -Config.MAX_DAILY_DD:
+            self._pause(f"Daily DD: {self.daily_pnl:.1f}%", cooldown=True)
+        elif self.total_pnl <= -Config.MAX_TOTAL_DD:
+            self._pause(f"Total DD: {self.total_pnl:.1f}%", permanent=True)
+        elif self.consecutive_losses >= Config.MAX_CONS_LOSSES:
+            self._pause(f"{self.consecutive_losses} pérdidas seguidas", cooldown=True)
+
+    def _pause(self, reason: str, permanent=False, cooldown=False):
+        self.trading_paused = True
+        self.pause_reason = reason
+        if cooldown and not permanent:
+            self.cooldown_until = datetime.now() + timedelta(
+                minutes=Config.COOLDOWN_MIN
+            )
+
+    def _maybe_reset_daily(self):
+        if datetime.now() >= self._daily_reset + timedelta(days=1):
+            self.daily_pnl = 0.0
+            self.consecutive_losses = 0
+            self._daily_reset = datetime.now().replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 3: ATR RISK MANAGER
+# ═══════════════════════════════════════════════════════════════════
+
+@dataclass
+class StopLevels:
+    stop_loss:         float
+    take_profit:       float
+    trailing_distance: float
+    risk_reward:       float
+    atr_value:         float
+    confidence:        str   # 'high' | 'medium' | 'low'
+
+
+class ATRRiskManager:
+    """SL/TP dinámicos basados en la volatilidad real (ATR)."""
+
+    def __init__(self, atr_period=14, sl_mult=2.0, tp_mult=3.0,
+                 trail_mult=1.5):
+        self.atr_period = atr_period
+        self.sl_mult    = sl_mult
+        self.tp_mult    = tp_mult
+        self.trail_mult = trail_mult
+
+    def calculate_stops(self, entry: float,
+                        direction: Literal['long', 'short'],
+                        df: pd.DataFrame) -> Optional[StopLevels]:
+        atr = self._atr(df)
+        if not atr:
+            return None
+        sl = entry - atr * self.sl_mult if direction == 'long' \
+             else entry + atr * self.sl_mult
+        tp = entry + atr * self.tp_mult if direction == 'long' \
+             else entry - atr * self.tp_mult
+        risk   = abs(entry - sl)
+        reward = abs(tp - entry)
+        rr     = round(reward / risk, 2) if risk else 0
+        return StopLevels(
+            stop_loss         = round(sl, 4),
+            take_profit       = round(tp, 4),
+            trailing_distance = round(atr * self.trail_mult, 4),
+            risk_reward       = rr,
+            atr_value         = round(atr, 4),
+            confidence        = 'high' if rr >= 2 else 'medium' if rr >= 1.5 else 'low',
+        )
+
+    def update_trailing(self, price: float, entry: float,
+                        current_stop: float,
+                        direction: Literal['long', 'short'],
+                        df: pd.DataFrame) -> Optional[float]:
+        atr = self._atr(df)
+        if not atr:
+            return None
+        if direction == 'long' and price >= entry + atr:
+            candidate = price - atr * self.trail_mult
+            return round(candidate, 4) if candidate > current_stop else None
+        elif direction == 'short' and price <= entry - atr:
+            candidate = price + atr * self.trail_mult
+            return round(candidate, 4) if candidate < current_stop else None
+        return None
+
+    def _atr(self, df: pd.DataFrame) -> Optional[float]:
+        if len(df) < self.atr_period + 1:
+            return None
+        try:
+            tr = pd.concat([
+                df['high'] - df['low'],
+                (df['high'] - df['close'].shift()).abs(),
+                (df['low']  - df['close'].shift()).abs(),
+            ], axis=1).max(axis=1)
+            return float(tr.rolling(self.atr_period).mean().iloc[-1])
+        except Exception:
+            return None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 4: KELLY POSITION SIZER
+# ═══════════════════════════════════════════════════════════════════
+
+@dataclass
+class TradeRecord:
+    pnl_pct: float
+    won: bool
+
+
+class KellyPositionSizer:
+    """Half-Kelly position sizing con mínimo de 20 trades para activarse."""
+
+    def __init__(self):
+        self._history: List[TradeRecord] = []
+
+    def add_trade(self, pnl_pct: float):
+        self._history.append(TradeRecord(pnl_pct, pnl_pct > 0))
+        if len(self._history) > 100:
+            self._history = self._history[-100:]
+
+    def calculate(self, balance: float, entry: float,
+                  stop_loss: float) -> Dict:
+        if entry <= 0 or abs(entry - stop_loss) == 0:
+            return {"error": "Precios inválidos", "position_usd": 0}
+        pct   = self._kelly_pct()
+        risk  = balance * pct
+        dist  = abs(entry - stop_loss) / entry
+        pos   = min(risk / dist, balance * Config.MAX_POSITION_PCT)
+        return {
+            "position_usd":  round(pos, 2),
+            "position_coin": round(pos / entry, 6),
+            "risk_pct":      round(pct * 100, 2),
+            "method":        "kelly" if len(self._history) >= 20 else "default",
+            "trades":        len(self._history),
+        }
+
+    def stats(self) -> Dict:
+        if not self._history:
+            return {"trades": 0, "win_rate": 0, "kelly_pct": 0}
+        wins   = [t for t in self._history if t.won]
+        losses = [t for t in self._history if not t.won]
+        return {
+            "trades":    len(self._history),
+            "win_rate":  round(len(wins) / len(self._history) * 100, 1),
+            "avg_win":   round(np.mean([t.pnl_pct for t in wins]), 3) if wins else 0,
+            "avg_loss":  round(np.mean([t.pnl_pct for t in losses]), 3) if losses else 0,
+            "kelly_pct": round(self._kelly_pct() * 100, 2),
+        }
+
+    def _kelly_pct(self) -> float:
+        min_pos = 0.01
+        max_pos = Config.MAX_POSITION_PCT
+        if len(self._history) < 20:
+            return min_pos
+        recent = self._history[-50:]
+        wins   = [t for t in recent if t.won]
+        losses = [t for t in recent if not t.won]
+        if not wins or not losses:
+            return min_pos
+        w = len(wins) / len(recent)
+        b = np.mean([t.pnl_pct for t in wins]) / \
+            np.mean([abs(t.pnl_pct) for t in losses])
+        kelly = ((b * w - (1 - w)) / b) * Config.KELLY_FRACTION
+        return float(np.clip(kelly, min_pos, max_pos))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 5: REGIME DETECTOR
+# ═══════════════════════════════════════════════════════════════════
+
+class RegimeDetector:
+    """
+    Detecta régimen de mercado sin dependencias externas (sin hmmlearn).
+    Usa ADX + Bollinger Width + ATR para clasificar.
+    """
+
+    REGIMES = ["STRONG_TREND", "WEAK_TREND", "RANGE", "CHOPPY",
+               "VOL_SPIKE", "SQUEEZE"]
+
+    def detect(self, df: pd.DataFrame) -> Dict:
+        if len(df) < 30:
+            return {"regime": "UNKNOWN", "confidence": 0.0,
+                    "should_trade": False}
+        try:
+            close = df['close']
+            high  = df['high']
+            low   = df['low']
+
+            # ADX simplificado
+            delta  = close.diff()
+            gain   = delta.where(delta > 0, 0).rolling(14).mean()
+            loss   = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rsi    = 100 - (100 / (1 + gain / loss.replace(0, 1e-10)))
+
+            tr     = pd.concat([
+                high - low,
+                (high - close.shift()).abs(),
+                (low  - close.shift()).abs(),
+            ], axis=1).max(axis=1)
+            atr    = tr.rolling(14).mean().iloc[-1]
+            atr_pct = atr / close.iloc[-1] * 100
+
+            # Bollinger Width
+            sma    = close.rolling(20).mean()
+            std    = close.rolling(20).std()
+            bb_w   = (std.iloc[-1] * 4) / sma.iloc[-1] * 100
+
+            # EMA alignment
+            ema20  = close.ewm(span=20).mean().iloc[-1]
+            ema50  = close.ewm(span=50).mean().iloc[-1]
+            ema200 = close.ewm(span=200).mean().iloc[-1]
+            aligned = (close.iloc[-1] > ema20 > ema50 > ema200) or \
+                      (close.iloc[-1] < ema20 < ema50 < ema200)
+
+            # Clasificación
+            if atr_pct > 3.0:
+                regime = "VOL_SPIKE"
+                conf   = min(atr_pct / 5, 1.0)
+            elif bb_w < 2.0:
+                regime = "SQUEEZE"
+                conf   = 0.75
+            elif aligned and atr_pct > 1.0:
+                regime = "STRONG_TREND"
+                conf   = 0.80
+            elif aligned:
+                regime = "WEAK_TREND"
+                conf   = 0.65
+            elif bb_w < 4.0:
+                regime = "RANGE"
+                conf   = 0.70
+            else:
+                regime = "CHOPPY"
+                conf   = 0.55
+
+            should_trade = regime in ["STRONG_TREND", "WEAK_TREND",
+                                      "VOL_SPIKE"] and conf >= 0.6
+
+            return {
+                "regime":       regime,
+                "confidence":   round(conf, 2),
+                "atr_pct":      round(atr_pct, 2),
+                "bb_width":     round(bb_w, 2),
+                "rsi":          round(rsi.iloc[-1], 1),
+                "ema_aligned":  aligned,
+                "should_trade": should_trade,
+            }
+        except Exception as e:
+            return {"regime": "ERROR", "confidence": 0,
+                    "should_trade": False, "error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 6: CORRELATION MONITOR
+# ═══════════════════════════════════════════════════════════════════
+
+class CorrelationMonitor:
+    """Detecta exposición duplicada entre posiciones correlacionadas."""
+
+    def __init__(self, lookback: int = 30):
+        self.lookback = lookback
+        self._prices: Dict[str, List[float]] = {}
+
+    def update(self, symbol: str, price: float):
+        if symbol not in self._prices:
+            self._prices[symbol] = []
+        self._prices[symbol].append(price)
+        if len(self._prices[symbol]) > self.lookback * 2:
+            self._prices[symbol] = self._prices[symbol][-self.lookback:]
+
+    def check(self, open_positions: List[str]) -> Dict:
+        if len(open_positions) < 2:
+            return {"risk": "low", "avg_corr": 0.0, "warnings": []}
+        corrs    = []
+        warnings = []
+        for i, s1 in enumerate(open_positions):
+            for s2 in open_positions[i + 1:]:
+                if s1 in self._prices and s2 in self._prices:
+                    p1 = pd.Series(self._prices[s1]).pct_change().dropna()
+                    p2 = pd.Series(self._prices[s2]).pct_change().dropna()
+                    n  = min(len(p1), len(p2), self.lookback)
+                    if n < 5:
+                        continue
+                    c = float(np.corrcoef(p1[-n:], p2[-n:])[0, 1])
+                    corrs.append(c)
+                    if c > 0.8:
+                        warnings.append(f"⚠️ {s1}/{s2}: {c:.0%} correlación")
+        avg = round(np.mean(corrs), 3) if corrs else 0.0
+        risk = ('critical' if avg > 0.8 else 'high' if avg > 0.6
+                else 'medium' if avg > 0.4 else 'low')
+        return {
+            "risk": risk, "avg_corr": avg, "warnings": warnings,
+            "recommendation": "REDUCIR" if risk in ['critical', 'high']
+                              else "OK"
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 7: BACKTESTER
+# ═══════════════════════════════════════════════════════════════════
+
+@dataclass
+class BacktestResult:
+    total_return_pct:    float
+    max_drawdown_pct:    float
+    sharpe_ratio:        float
+    sortino_ratio:       float
+    win_rate_pct:        float
+    profit_factor:       float
+    total_trades:        int
+    avg_win_pct:         float
+    avg_loss_pct:        float
+    equity_curve:        List[float] = field(default_factory=list)
+
+    def summary(self) -> str:
+        return (
+            f"Retorno: {self.total_return_pct:+.1f}% | "
+            f"DD máx: {self.max_drawdown_pct:.1f}% | "
+            f"Sharpe: {self.sharpe_ratio:.2f} | "
+            f"Win: {self.win_rate_pct:.0f}% | "
+            f"PF: {self.profit_factor:.2f} | "
+            f"Trades: {self.total_trades}"
+        )
+
+
+class Backtester:
+    """Motor de backtesting con slippage y comisiones realistas."""
+
+    def __init__(self, commission=0.001, slippage=0.0005,
+                 initial_capital=10_000.0):
+        self.commission = commission
+        self.slippage   = slippage
+        self.capital0   = initial_capital
+
+    def run(self, df: pd.DataFrame, strategy_fn) -> BacktestResult:
+        cap      = self.capital0
+        equity   = [cap]
+        peak     = cap
+        max_dd   = 0.0
+        trades   = []
+        position = None
+
+        for i in range(50, len(df)):
+            history = df.iloc[:i]
+            candle  = df.iloc[i]
+
+            # Cerrar posición si tocó SL o TP
+            if position:
+                pnl = 0.0
+                exited = False
+                d = position['direction']
+                if d == 'long':
+                    if candle['low']  <= position['sl']:
+                        pnl, exited = (position['sl'] - position['entry']) / position['entry'], True
+                    elif candle['high'] >= position['tp']:
+                        pnl, exited = (position['tp'] - position['entry']) / position['entry'], True
+                else:
+                    if candle['high'] >= position['sl']:
+                        pnl, exited = (position['entry'] - position['sl']) / position['entry'], True
+                    elif candle['low']  <= position['tp']:
+                        pnl, exited = (position['entry'] - position['tp']) / position['entry'], True
+
+                if exited:
+                    cap  *= (1 + pnl - self.commission * 2)
+                    trades.append({'pnl_pct': pnl * 100, 'won': pnl > 0})
+                    position = None
+
+            # Abrir nueva posición
+            if not position:
+                try:
+                    sig = strategy_fn(history)
+                except Exception:
+                    sig = None
+                if sig and hasattr(sig, 'direction'):
+                    ep = candle['close'] * (1 + self.slippage
+                         if sig.direction == 'long' else 1 - self.slippage)
+                    position = {
+                        'entry': ep, 'sl': sig.stop_loss,
+                        'tp': sig.take_profit, 'direction': sig.direction
+                    }
+
+            equity.append(cap)
+            if cap > peak:
+                peak = cap
+            dd = (peak - cap) / peak * 100
+            if dd > max_dd:
+                max_dd = dd
+
+        if not trades:
+            return BacktestResult(0, 0, 0, 0, 0, 0, 0, 0, 0, equity)
+
+        ret     = pd.Series(equity).pct_change().dropna()
+        wins    = [t for t in trades if t['won']]
+        losses  = [t for t in trades if not t['won']]
+        wr      = len(wins) / len(trades) * 100
+        avg_w   = np.mean([t['pnl_pct'] for t in wins]) if wins else 0
+        avg_l   = abs(np.mean([t['pnl_pct'] for t in losses])) if losses else 0
+        pf      = (sum(t['pnl_pct'] for t in wins) /
+                   abs(sum(t['pnl_pct'] for t in losses) or 1))
+        sharpe  = (np.sqrt(365) * ret.mean() / ret.std()
+                   if ret.std() > 0 else 0)
+        down    = ret[ret < 0]
+        sortino = (np.sqrt(365) * ret.mean() / down.std()
+                   if len(down) > 1 and down.std() > 0 else 0)
+        total_r = (cap - self.capital0) / self.capital0 * 100
+
+        return BacktestResult(
+            total_return_pct = round(total_r, 2),
+            max_drawdown_pct = round(max_dd, 2),
+            sharpe_ratio     = round(sharpe, 2),
+            sortino_ratio    = round(sortino, 2),
+            win_rate_pct     = round(wr, 1),
+            profit_factor    = round(pf, 2),
+            total_trades     = len(trades),
+            avg_win_pct      = round(avg_w, 3),
+            avg_loss_pct     = round(avg_l, 3),
+            equity_curve     = equity,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 8: EXCHANGE MANAGER
+# ═══════════════════════════════════════════════════════════════════
+
+class ExchangeManager:
+    """Conexión Binance con caché y OBI."""
+
+    def __init__(self):
+        self.exchange = None
+        self._cache: Dict[str, pd.DataFrame] = {}
+
+    def connect(self, api_key: str = None, api_secret: str = None):
+        if Config.DEMO_MODE or self.exchange:
+            return
+        try:
+            import ccxt
+            cfg = {
+                'enableRateLimit': True,
+                'apiKey': api_key, 'secret': api_secret,
+                'options': {'defaultType':
+                    'spot' if Config.USE_SPOT else 'future'},
+            }
+            self.exchange = (ccxt.binance(cfg) if Config.USE_SPOT
+                             else ccxt.binanceusdm(cfg))
+        except ImportError:
+            st.error("ccxt no instalado")
+
+    def fetch_candles(self, tf: str) -> pd.DataFrame:
+        if Config.DEMO_MODE or not self.exchange:
+            return self._demo_candles(tf)
+        try:
+            data = self.exchange.fetch_ohlcv(
+                Config.SYMBOL, tf, limit=Config.CANDLE_LIMIT
+            )
+            df = pd.DataFrame(data,
+                columns=['time','open','high','low','close','volume'])
+            df['time'] = pd.to_datetime(df['time'], unit='ms')
+            df = df.set_index('time')
+            self._cache[tf] = df
+            return df
+        except Exception:
+            return self._cache.get(tf, self._demo_candles(tf))
+
+    def fetch_all_timeframes(self) -> Dict[str, pd.DataFrame]:
+        tfs = [Config.TF_ENTRY, Config.TF_CONFIRM, Config.TF_TREND]
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            results = list(ex.map(self.fetch_candles, tfs))
+        return {tf: df for tf, df in zip(tfs, results) if not df.empty}
+
+    def fetch_obi(self, depth: int = 20) -> Dict:
+        if Config.DEMO_MODE or not self.exchange:
+            rng = np.random.uniform(-0.15, 0.15)
+            return {'obi': round(rng, 4),
+                    'bids_vol': round(abs(rng) * 1000, 2),
+                    'asks_vol': round(abs(rng) * 900, 2)}
+        try:
+            ob     = self.exchange.fetch_order_book(Config.SYMBOL, depth)
+            b_v    = sum(b[1] for b in ob['bids'])
+            a_v    = sum(a[1] for a in ob['asks'])
+            total  = b_v + a_v
+            obi    = (b_v - a_v) / total if total else 0
+            return {'obi': round(obi, 4),
+                    'bids_vol': round(b_v, 2),
+                    'asks_vol': round(a_v, 2)}
+        except Exception:
+            return {'obi': 0.0, 'bids_vol': 0.0, 'asks_vol': 0.0}
+
+    @staticmethod
+    def _demo_candles(tf: str) -> pd.DataFrame:
+        """Genera velas sintéticas para modo demo."""
+        np.random.seed(abs(hash(tf)) % 2**31)
+        n      = Config.CANDLE_LIMIT
+        price  = 65_000.0
+        prices = [price]
+        for _ in range(n - 1):
+            price += np.random.normal(0, price * 0.002)
+            prices.append(max(price, 1))
+        closes = np.array(prices)
+        highs  = closes * np.random.uniform(1.001, 1.005, n)
+        lows   = closes * np.random.uniform(0.995, 0.999, n)
+        opens  = np.roll(closes, 1)
+        opens[0] = closes[0]
+        idx = pd.date_range(end=datetime.now(), periods=n, freq=tf)
+        return pd.DataFrame({
+            'open': opens, 'high': highs,
+            'low': lows,   'close': closes,
+            'volume': np.random.uniform(100, 1000, n)
+        }, index=idx)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 9: AI BRAIN
+# ═══════════════════════════════════════════════════════════════════
+
+class AIBrain:
+    """Análisis de sentimiento vía Groq/Llama."""
+
+    def __init__(self):
+        self.sentiment = {"score": 0.0, "label": "NEUTRAL",
+                          "summary": "Sin datos", "updated": None}
+
+    def analyze(self) -> Dict:
+        if not Config.GROQ_API_KEY:
+            return self.sentiment
+        try:
+            from groq import Groq
+            client = Groq(api_key=Config.GROQ_API_KEY)
+            resp   = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                max_tokens=200,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Analiza el sentimiento actual del mercado cripto BTC. "
+                        "Responde SOLO con JSON: "
+                        '{"score": <float -1 a 1>, '
+                        '"label": "BULLISH|BEARISH|NEUTRAL", '
+                        '"summary": "<20 palabras max>"}'
+                    )
+                }]
+            )
+            raw  = resp.choices[0].message.content.strip()
+            data = json.loads(raw)
+            self.sentiment = {**data, "updated": datetime.now().isoformat()}
+        except Exception as e:
+            self.sentiment["error"] = str(e)
+        return self.sentiment
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 10: AUTH MANAGER (simple, sin BD externa)
+# ═══════════════════════════════════════════════════════════════════
+
+class AuthManager:
+    """
+    Autenticación básica con archivo JSON local.
+    En Railway, usa un volumen persistente o migra a una BD.
+    """
+
+    DB_PATH = os.getenv("AUTH_DB_PATH", "/app/users.json")
+
+    def _load(self) -> Dict:
+        try:
+            with open(self.DB_PATH) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save(self, data: Dict):
+        try:
+            os.makedirs(os.path.dirname(self.DB_PATH), exist_ok=True)
+            with open(self.DB_PATH, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def _hash(self, pw: str) -> str:
+        return hashlib.sha256(pw.encode()).hexdigest()
+
+    def authenticate(self, username: str, password: str) -> bool:
+        users = self._load()
+        user  = users.get(username)
+        return bool(user and user.get('password') == self._hash(password))
+
+    def register(self, username: str, password: str) -> bool:
+        users = self._load()
+        if username in users:
+            return False
+        users[username] = {'password': self._hash(password),
+                           'created': datetime.now().isoformat()}
+        self._save(users)
+        return True
+
+    def get_keys(self, username: str) -> Tuple[str, str]:
+        users    = self._load()
+        user     = users.get(username, {})
+        return user.get('api_key', ''), user.get('api_secret', '')
+
+    def save_keys(self, username: str, key: str, secret: str):
+        users = self._load()
+        if username in users:
+            users[username]['api_key']    = key
+            users[username]['api_secret'] = secret
+            self._save(users)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 11: SESSION STATE INIT
+# ═══════════════════════════════════════════════════════════════════
+
+def _init_session():
+    defaults = {
+        'logged_in':    False,
+        'username':     '',
+        'initialized':  False,
+        'exchange':     ExchangeManager(),
+        'circuit_breaker': CircuitBreaker(),
+        'risk_manager': ATRRiskManager(),
+        'position_sizer': KellyPositionSizer(),
+        'regime_detector': RegimeDetector(),
+        'corr_monitor': CorrelationMonitor(),
+        'ai_brain':     AIBrain(),
+        'auth':         AuthManager(),
+        'demo_mode':    True,
+        'last_refresh': None,
+        'tf_data':      {},
+        'obi_data':     {},
+        'regime_data':  {},
+        'ai_data':      {},
     }
-
-    /* Hide Streamlit Branding (Header, Footer, Menu) */
-    header[data-testid="stHeader"] { display: none; }
-    footer[data-testid="stFooter"] { display: none; }
-    #MainMenu { visibility: hidden; }
-
-    /* Adjust Main Container Spacing */
-    [data-testid="block-container"] { 
-        padding-top: 1rem; 
-        padding-left: 3rem; 
-        padding-right: 3rem; 
-        max-width: 1700px; 
-    }
-
-    /* Titles & Headers */
-    h1 {
-        font-weight: 800 !important;
-        background: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        letter-spacing: -1.5px;
-        text-shadow: 0px 4px 25px rgba(14, 165, 233, 0.4);
-    }
-    h2, h3 { font-weight: 700 !important; color: #f1f5f9; letter-spacing: -0.5px; }
-
-    /* Sidebar Styling Premium */
-    section[data-testid="stSidebar"] { 
-        background: rgba(10, 15, 30, 0.95) !important;
-        backdrop-filter: blur(20px);
-        -webkit-backdrop-filter: blur(20px);
-        border-right: 1px solid rgba(14, 165, 233, 0.15);
-    }
-    section[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.05) !important; }
-
-    /* Glassmorphism Metrics (Ultra Premium) */
-    div[data-testid="stMetric"] {
-        background: rgba(15, 23, 42, 0.4);
-        backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        border-radius: 20px;
-        padding: 24px;
-        position: relative;
-        overflow: hidden;
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-    }
-    
-    div[data-testid="stMetric"]::before {
-        content: '';
-        position: absolute;
-        top: 0; left: 0; right: 0; height: 2px;
-        background: linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.5), transparent);
-        opacity: 0;
-        transition: opacity 0.3s ease;
-    }
-    
-    div[data-testid="stMetric"]:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 15px 40px rgba(14, 165, 233, 0.15);
-        border: 1px solid rgba(14, 165, 233, 0.3);
-    }
-    
-    div[data-testid="stMetric"]:hover::before { opacity: 1; }
-
-    div[data-testid="stMetric"] label { 
-        color: #94a3b8 !important; 
-        font-weight: 600 !important; 
-        font-size: 0.8rem !important; 
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    
-    div[data-testid="stMetric"] [data-testid="stMetricValue"] { 
-        font-family: 'JetBrains Mono', monospace !important;
-        font-weight: 700 !important; 
-        font-size: 2.2rem !important;
-        color: #ffffff !important;
-        text-shadow: 0 0 10px rgba(255,255,255,0.1);
-    }
-
-    /* Expander / Containers */
-    div[data-testid="stExpander"] {
-        background: rgba(15, 23, 42, 0.5);
-        backdrop-filter: blur(12px);
-        border: 1px solid rgba(255,255,255,0.05);
-        border-radius: 16px;
-    }
-
-    /* Tab Styling */
-    button[data-baseweb="tab"] {
-        background: transparent !important;
-        color: #94a3b8 !important;
-        font-weight: 600;
-    }
-    button[data-baseweb="tab"][aria-selected="true"] {
-        color: #38bdf8 !important;
-        border-bottom-color: #38bdf8 !important;
-    }
-
-    /* Buttons */
-    .stButton>button {
-        background: linear-gradient(135deg, #0284c7 0%, #3b82f6 100%);
-        color: white;
-        border: 1px solid rgba(255,255,255,0.1);
-        border-radius: 12px;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-        padding: 0.6rem 1.5rem;
-        transition: all 0.2s ease;
-        box-shadow: 0 4px 15px rgba(2, 132, 199, 0.3);
-    }
-    .stButton>button:hover {
-        transform: scale(1.02) translateY(-2px);
-        box-shadow: 0 8px 25px rgba(2, 132, 199, 0.5);
-        border: 1px solid rgba(255,255,255,0.3);
-    }
-
-    /* Divider */
-    hr {
-        border-color: rgba(255, 255, 255, 0.05) !important;
-        margin: 2rem 0;
-    }
-    
-    /* Dataframes */
-    [data-testid="stDataFrame"] {
-        border-radius: 16px;
-        overflow: hidden;
-        border: 1px solid rgba(255,255,255,0.08);
-        box-shadow: 0 10px 30px rgba(0,0,0,0.4);
-    }
-    [data-testid="stDataFrame"] table {
-        font-family: 'JetBrains Mono', monospace !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
-# ── INIT STATE ───────────────────────────────────────────
-if 'exchange' not in st.session_state:
-    st.session_state.exchange = ExchangeManager()
-    st.session_state.strategy = StrategyEngine()
-    st.session_state.ai_brain = AIBrain()
-    st.session_state.breaker = CircuitBreaker()
-    st.session_state.sizer = KellyPositionSizer()
-    st.session_state.active_signal = None
-    st.session_state.initialized = False
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 12: LÓGICA DE CONEXIÓN Y DATOS
+# ═══════════════════════════════════════════════════════════════════
+
+def _resolve_mode():
+    """Detecta si usar llaves del usuario o globales de Railway."""
+    username = st.session_state.username
+    u_key, u_sec = st.session_state.auth.get_keys(username)
+
+    # Prioridad: llaves del usuario → llaves globales de Railway
+    has_user_keys   = bool(u_key and u_sec)
+    has_global_keys = bool(Config.BINANCE_API_KEY and Config.BINANCE_SECRET)
+
+    if has_user_keys:
+        key, sec = u_key, u_sec
+    elif has_global_keys:
+        key, sec = Config.BINANCE_API_KEY, Config.BINANCE_SECRET
+    else:
+        key, sec = '', ''
+
+    Config.DEMO_MODE = not bool(key and sec)
+    st.session_state.demo_mode = Config.DEMO_MODE
+    return key, sec
 
 
-# ── LOGIN / REGISTER UI ──────────────────────────────────
-if not st.session_state.authenticated:
-    # Layout estético centralizado
-    st.markdown("<br><br><br>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1, 1.5, 1])
-    with c2:
-        st.markdown("<div class='stExpander' style='padding: 2rem; border-radius: 20px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(15, 23, 42, 0.8); box-shadow: 0 10px 40px rgba(0,0,0,0.5); text-align: center;'>", unsafe_allow_html=True)
-        st.markdown("<h1 style='text-align:center; font-size: 3rem;'>⚡ TITANIUM <span style='font-weight: 300; color: #94a3b8;'>PRO</span></h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align:center; color: #64748b; font-size: 1.1rem; margin-bottom: 2rem;'>Institutional Algorithmic Trading Access</p>", unsafe_allow_html=True)
-        
-        tab_log, tab_reg = st.tabs(["🔐 Entrar", "📝 Registro VIP"])
-        
-        with tab_log:
-            with st.form("login_form", clear_on_submit=True):
-                usr = st.text_input("Usuario Trader", placeholder="Ej: NeoTrader")
-                pwd = st.text_input("Clave Secreta", type="password", placeholder="••••••••")
-                submitted = st.form_submit_button("Ingresar al Motor", use_container_width=True)
-                
-                if submitted:
-                    ok, msg = authenticate_user(usr, pwd)
-                    if ok:
-                        st.session_state.authenticated = True
-                        st.session_state.username = usr
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-                        
-        with tab_reg:
-            with st.form("register_form", clear_on_submit=True):
-                new_usr = st.text_input("Nuevo Usuario", placeholder="Crea tu alias")
-                new_pwd = st.text_input("Nueva Clave", type="password", placeholder="Mínimo 6 caracteres")
-                invite = st.text_input("Passkey VIP (Invitación)", type="password", placeholder="Código de tu patrocinador")
-                reg_submitted = st.form_submit_button("Solicitar Acceso", use_container_width=True)
-                
-                if reg_submitted:
-                    rok, rmsg = register_user(new_usr, new_pwd, invite)
-                    if rok:
-                        st.success(rmsg)
-                        st.balloons()
-                    else:
-                        st.error(rmsg)
-                        
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.stop()
+def _fetch_data():
+    """Fetch de todos los datos necesarios para el dashboard."""
+    key, sec = _resolve_mode()
+    ex: ExchangeManager = st.session_state.exchange
 
-
-# ── FETCH & ANALYZE ──────────────────────────────────────
-# Obtain User Data
-usr_data = get_user_data(st.session_state.get('username', ''))
-u_key = usr_data.get('binance_api_key', '')
-u_sec = usr_data.get('binance_secret', '')
-
-# Modify Demo Mode dynamically if keys exist (User Profile OR Global Env)
-has_keys = bool(u_key and u_sec) or bool(config.BINANCE_API_KEY and config.BINANCE_SECRET)
-config.DEMO_MODE = not has_keys
-
-# Si usamos llaves globales, las pasamos a la conexión
-if not bool(u_key and u_sec) and not config.DEMO_MODE:
-    u_key = config.BINANCE_API_KEY
-    u_sec = config.BINANCE_SECRET
-
-def fetch_data():
-    ex = st.session_state.exchange
-    brain = st.session_state.ai_brain
-    
-    # 1. Background AI check (Non-blocking)
-    import threading
-    if (time.time() - brain.sentiment_state["last_check"]) > 300:
-        threading.Thread(target=brain.analyze_sentiment, daemon=True).start()
-
-    # 2. Parallel Market Data Fetching
-    if not st.session_state.initialized or (not config.DEMO_MODE and ex.exchange is None):
-        ex.connect(api_key=u_key, api_secret=u_sec)
+    if not st.session_state.initialized or \
+       (not Config.DEMO_MODE and ex.exchange is None):
+        ex.connect(key, sec)
         st.session_state.initialized = True
-    
-    # These are now parallelized inside exchange.py
-    tf_data = ex.fetch_all_timeframes()
-    ob_data = ex.fetch_obi()
-    
-    for tf in tf_data:
-        tf_data[tf] = calculate_all(tf_data[tf])
-    return tf_data, ob_data
 
-def get_data():
-    return fetch_data()
+    tf_data  = ex.fetch_all_timeframes()
+    obi_data = ex.fetch_obi()
 
-def safe_val(row, col, default=0):
-    v = row.get(col, default)
-    return default if pd.isna(v) else float(v)
+    # Régimen basado en TF de tendencia
+    rd: RegimeDetector = st.session_state.regime_detector
+    trend_df = tf_data.get(Config.TF_TREND, pd.DataFrame())
+    regime   = rd.detect(trend_df) if not trend_df.empty else {}
 
-
-# ── FETCH & ANALYZE ──────────────────────────────────────
-tf_data, ob_data = get_data()
-entry_df = tf_data.get(config.TF_ENTRY)
-last = entry_df.iloc[-1] if entry_df is not None and len(entry_df) > 0 else None
-
-strategy = st.session_state.strategy
-long_s, long_bd, short_s, short_bd, new_sig = strategy.analyze(tf_data, ob_data)
-
-ai_status = st.session_state.ai_brain.sentiment_state
-breaker = st.session_state.breaker
-sizer = st.session_state.sizer
-
-if new_sig and breaker.can_trade() and not ai_status.get('panic_mode', False):
-    st.session_state.active_signal = new_sig
-
-active_signal = st.session_state.active_signal
-
-# Check signal status
-if active_signal and last is not None:
-    price_now = last['close']
-    closed = strategy.check_signal_status(active_signal, price_now)
-    if closed:
-        pnl = closed.calculate_pnl(price_now)
-        breaker.record_trade(pnl)
-        sizer.add_trade(pnl)
-        st.session_state.active_signal = None
-        active_signal = None
+    st.session_state.tf_data     = tf_data
+    st.session_state.obi_data    = obi_data
+    st.session_state.regime_data = regime
+    st.session_state.last_refresh = datetime.now()
+    return tf_data, obi_data, regime
 
 
-# ══════════════════════════════════════════════════════════
-# SIDEBAR PROFILE & PORTFOLIO MANAGER
-# ══════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown("## 👤 Perfil Trader")
-    st.caption(f"Conectado como: **{st.session_state.get('username', 'VIP')}**")
-    st.divider()
-    
-    st.markdown("### 🏦 Conexión Portafolio (Binance API)")
-    st.markdown("<small style='color: #94a3b8;'>El bot puede manejar tu portafolio y conectar el API de Binance para mejorar la información del mercado y graficar sobre fuego real.</small>", unsafe_allow_html=True)
-    
-    with st.expander("⚙️ Configurar Llaves (API Key)", expanded=not has_keys):
-        with st.form("api_form"):
-            in_key = st.text_input("Binance API Key", value=u_key, type="password")
-            in_sec = st.text_input("Binance Secret", value=u_sec, type="password")
-            if st.form_submit_button("Guardar & Conectar"):
-                update_api_keys(st.session_state.username, in_key, in_sec)
-                # Forzar reconexión
-                st.session_state.initialized = False
-                ext = st.session_state.exchange
-                if ext.exchange:
-                    try:
-                        ext.close()
-                    except: pass
-                st.success("Llaves guardadas. Reiniciando bot...")
-                st.rerun()
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 13: ESTILOS CSS (Glassmorphism Dark)
+# ═══════════════════════════════════════════════════════════════════
 
-    status_color = "🟢 LIVE TRADING" if has_keys else "🟠 SIMULACIÓN (DEMO)"
-    st.markdown(f"<br><div style='text-align:center; padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.05);'><b>Modo Actual:</b><br/>{status_color}</div>", unsafe_allow_html=True)
+STYLES = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Space Grotesk', sans-serif;
+}
+
+/* ── Fondo ── */
+.stApp {
+    background: linear-gradient(135deg, #0a0a0f 0%, #0d1117 50%, #0a0f1a 100%);
+    min-height: 100vh;
+}
+
+/* ── Métricas personalizadas ── */
+.titanium-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    padding: 20px 24px;
+    backdrop-filter: blur(12px);
+    transition: border-color 0.2s;
+    margin-bottom: 12px;
+}
+.titanium-card:hover { border-color: rgba(99,179,237,0.3); }
+
+.metric-label {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.4);
+    margin-bottom: 6px;
+}
+.metric-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 26px;
+    font-weight: 600;
+    color: #e2e8f0;
+    line-height: 1.1;
+}
+.metric-sub {
+    font-size: 12px;
+    color: rgba(255,255,255,0.35);
+    margin-top: 4px;
+}
+
+/* ── Badges de estado ── */
+.badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.badge-green  { background: rgba(72,187,120,0.15); color: #68d391; border: 1px solid rgba(72,187,120,0.3); }
+.badge-yellow { background: rgba(237,137,54,0.15); color: #f6ad55; border: 1px solid rgba(237,137,54,0.3); }
+.badge-red    { background: rgba(245,101,101,0.15); color: #fc8181; border: 1px solid rgba(245,101,101,0.3); }
+.badge-blue   { background: rgba(99,179,237,0.15); color: #63b3ed; border: 1px solid rgba(99,179,237,0.3); }
+
+/* ── Header logo ── */
+.titanium-header {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 28px;
+    font-weight: 700;
+    background: linear-gradient(135deg, #63b3ed, #9f7aea, #ed64a6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    letter-spacing: -0.5px;
+}
+.titanium-sub {
+    font-size: 12px;
+    color: rgba(255,255,255,0.3);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-top: -4px;
+}
+
+/* ── Tabla ── */
+.stDataFrame { border-radius: 12px; overflow: hidden; }
+
+/* ── Sidebar ── */
+section[data-testid="stSidebar"] {
+    background: rgba(10,10,15,0.9) !important;
+    border-right: 1px solid rgba(255,255,255,0.06);
+}
+
+/* ── Botones ── */
+.stButton > button {
+    background: linear-gradient(135deg, #2d3748, #1a202c);
+    border: 1px solid rgba(255,255,255,0.1);
+    color: #e2e8f0;
+    border-radius: 10px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+.stButton > button:hover {
+    border-color: rgba(99,179,237,0.5);
+    background: rgba(99,179,237,0.08);
+}
+
+/* ── OBI Bar ── */
+.obi-bar-container {
+    background: rgba(255,255,255,0.05);
+    border-radius: 8px;
+    height: 8px;
+    overflow: hidden;
+    margin: 8px 0;
+}
+.obi-bar-fill {
+    height: 100%;
+    border-radius: 8px;
+    transition: width 0.5s;
+}
+</style>
+"""
 
 
-# ══════════════════════════════════════════════════════════
-# HEADER (nativo)
-# ══════════════════════════════════════════════════════════
-tz = pytz.timezone(config.MY_TIMEZONE)
-now_str = datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
-h_utc = datetime.now(pytz.utc).hour
-sessions_active = [s for s in config.SESSIONS.values() if s['start'] <= h_utc < s['end']]
-session_str = ' + '.join(f"{s['emoji']} {s['name']}" for s in sessions_active) if sessions_active else '🌙 OFF-HOURS'
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 14: COMPONENTES UI
+# ═══════════════════════════════════════════════════════════════════
 
-ai_reason = ai_status.get('reason', 'OK')
-ai_score = ai_status.get('score', 50)
-panic = ai_status.get('panic_mode', False)
-
-# ── BLACK SWAN ALERT BANNER ──────────────────────────────
-if panic:
+def card(label: str, value: str, sub: str = "", badge: str = ""):
+    badge_html = f'<span class="badge badge-{badge}">{badge.upper()}</span>' \
+                 if badge else ""
     st.markdown(f"""
-    <div style="background: linear-gradient(90deg, #991b1b, #ef4444, #991b1b); padding: 1.5rem; border-radius: 12px; margin-bottom: 2rem; border: 1px solid #f87171; box-shadow: 0 10px 40px rgba(220, 38, 38, 0.4); text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 2.2rem; text-shadow: 2px 2px 10px rgba(0,0,0,0.5);">💀 BLACK SWAN DETECTED</h1>
-        <p style="color: white; font-weight: 600; font-size: 1.2rem; margin: 0.5rem 0;">{ai_reason}</p>
-        <div style="background: white; color: #dc2626; display: inline-block; padding: 0.2rem 1rem; border-radius: 5px; font-weight: 800; letter-spacing: 1px;">TRADING PAUSED</div>
+    <div class="titanium-card">
+        <div class="metric-label">{label} {badge_html}</div>
+        <div class="metric-value">{value}</div>
+        <div class="metric-sub">{sub}</div>
     </div>
     """, unsafe_allow_html=True)
 
-title_col, ai_col = st.columns([3, 1])
-with title_col:
-    st.title("⚡ TITANIUM v8.0 PRO")
-    st.caption(f"{config.SYMBOL}  •  {session_str}  •  {now_str} COT")
-with ai_col:
-    if not panic:
-        score_color = "#4ade80" if ai_score >= 50 else "#f87171"
-        st.markdown(f"""
-        <div style="text-align: right; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 12px; border: 1px solid rgba(255,255,255,0.05);">
-            <div style="color: #94a3b8; font-size: 0.75rem; text-transform: uppercase;">AI Sentiment Score</div>
-            <div style="color: {score_color}; font-size: 1.8rem; font-family: 'JetBrains Mono'; font-weight: 700;">{ai_score}</div>
-            <div style="color: #cbd5e1; font-size: 0.8rem;">{ai_reason}</div>
+
+def obi_bar(obi_value: float):
+    pct    = int((obi_value + 1) / 2 * 100)  # -1..1 → 0..100
+    color  = "#68d391" if obi_value > 0 else "#fc8181"
+    label  = "PRESIÓN COMPRADORA" if obi_value > 0 else "PRESIÓN VENDEDORA"
+    st.markdown(f"""
+    <div class="titanium-card">
+        <div class="metric-label">Order Book Imbalance</div>
+        <div class="metric-value">{obi_value:+.4f}</div>
+        <div class="metric-sub">{label}</div>
+        <div class="obi-bar-container">
+            <div class="obi-bar-fill"
+                 style="width:{pct}%; background:{color};">
+            </div>
         </div>
-        """, unsafe_allow_html=True)
+    </div>
+    """, unsafe_allow_html=True)
 
-st.divider()
+
+def regime_card(data: Dict):
+    regime  = data.get('regime', 'UNKNOWN')
+    conf    = data.get('confidence', 0)
+    should  = data.get('should_trade', False)
+    colors  = {
+        'STRONG_TREND': 'green', 'WEAK_TREND': 'green',
+        'VOL_SPIKE': 'yellow', 'RANGE': 'blue',
+        'CHOPPY': 'red', 'SQUEEZE': 'yellow',
+    }
+    color = colors.get(regime, 'blue')
+    trade_badge = (
+        '<span class="badge badge-green">OPERAR</span>'
+        if should else
+        '<span class="badge badge-red">ESPERAR</span>'
+    )
+    st.markdown(f"""
+    <div class="titanium-card">
+        <div class="metric-label">Régimen de Mercado</div>
+        <div class="metric-value">
+            <span class="badge badge-{color}">{regime}</span>
+        </div>
+        <div class="metric-sub">
+            Confianza: {conf:.0%} &nbsp;|&nbsp; {trade_badge}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════════
-# MAIN TRADING DASHBOARD
-# ══════════════════════════════════════════════════════════
-if last is not None:
-    price = last['close']
-    obi = ob_data['obi']
-    adx = safe_val(last, 'ADX')
-    rsi = safe_val(last, 'RSI', 50)
-    atr = safe_val(last, 'ATR')
-    atr_pct = safe_val(last, 'ATR_pct', 0)
-    mh = safe_val(last, 'MACD_hist')
-    d_trend, d_strength = get_trend_direction(entry_df)
-    m_trend = get_macro_trend_direction(entry_df)
+def circuit_card(cb: CircuitBreaker):
+    status = cb.get_status()
+    ok     = status['can_trade']
+    color  = "green" if ok else "red"
+    label  = "ACTIVO" if ok else "PAUSADO"
+    reason = status.get('pause_reason') or "—"
+    dd_d   = status['daily_pnl_pct']
+    dd_t   = status['total_pnl_pct']
+    st.markdown(f"""
+    <div class="titanium-card">
+        <div class="metric-label">Circuit Breaker</div>
+        <div class="metric-value">
+            <span class="badge badge-{color}">{label}</span>
+        </div>
+        <div class="metric-sub">
+            PnL hoy: {dd_d:+.2f}% &nbsp;|&nbsp;
+            PnL total: {dd_t:+.2f}% &nbsp;|&nbsp;
+            {reason}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # -- ROW 1: TRADE & RISK STATUS (The most critical info for the trader) --
-    cb = breaker.get_status()
-    ks = sizer.get_status()
-    can_trade = cb.get('can_trade', True)
-    
-    col_sig, col_risk = st.columns([1, 1])
-    
-    with col_sig:
-        st.subheader("🎯 Active Trade Status")
-        if active_signal:
-            st.success(f"ACTIVE: {active_signal.direction} @ ${active_signal.entry:,.1f}")
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("Current Price", f"${price:,.1f}")
-            s2.metric("Stop Loss", f"${active_signal.stop_loss:,.1f}", f"-{active_signal.sl_distance:,.1f}", delta_color="inverse")
-            s3.metric("Take Profit", f"${active_signal.take_profit:,.1f}", f"+{active_signal.tp_distance:,.1f}")
-            s4.metric("Trailing Phase", getattr(active_signal, 'trailing_phase', 'INITIAL'))
+
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 15: PÁGINAS
+# ═══════════════════════════════════════════════════════════════════
+
+def page_login():
+    st.markdown('<div class="titanium-header">⚡ TITANIUM PRO</div>', True)
+    st.markdown('<div class="titanium-sub">Sistema de Trading Algorítmico v9</div>', True)
+    st.markdown("---")
+
+    tab_in, tab_reg = st.tabs(["🔐 Iniciar sesión", "📝 Registrarse"])
+
+    with tab_in:
+        u = st.text_input("Usuario", key="li_u")
+        p = st.text_input("Contraseña", type="password", key="li_p")
+        if st.button("Entrar", use_container_width=True):
+            if st.session_state.auth.authenticate(u, p):
+                st.session_state.logged_in = True
+                st.session_state.username  = u
+                st.session_state.initialized = False
+                st.rerun()
+            else:
+                st.error("❌ Credenciales incorrectas")
+
+    with tab_reg:
+        nu = st.text_input("Nuevo usuario", key="reg_u")
+        np_ = st.text_input("Contraseña", type="password", key="reg_p")
+        if st.button("Crear cuenta", use_container_width=True):
+            if st.session_state.auth.register(nu, np_):
+                st.success("✅ Cuenta creada — inicia sesión")
+            else:
+                st.error("❌ Usuario ya existe")
+
+
+def page_dashboard():
+    # ── Sidebar ─────────────────────────────────────────────────
+    with st.sidebar:
+        st.markdown('<div class="titanium-header" style="font-size:20px">⚡ TITANIUM</div>', True)
+        mode = "🟡 DEMO" if st.session_state.demo_mode else "🟢 REAL"
+        st.markdown(f"**{mode}** — {st.session_state.username}")
+        st.markdown("---")
+
+        # Navegación
+        page = st.radio("Navegación", [
+            "📊 Dashboard", "🎯 Circuit Breaker",
+            "📐 Position Sizer", "🔬 Backtesting",
+            "⚙️ Configuración"
+        ], label_visibility="collapsed")
+
+        st.markdown("---")
+        refresh = st.slider("Auto-refresh (s)", 10, 120, 30)
+        if st.button("🔄 Refrescar ahora", use_container_width=True):
+            _fetch_data()
+        if st.button("🚪 Cerrar sesión", use_container_width=True):
+            st.session_state.logged_in = False
+            st.session_state.username  = ''
+            st.rerun()
+
+    # ── Fetch de datos ───────────────────────────────────────────
+    if (st.session_state.last_refresh is None or
+        (datetime.now() - st.session_state.last_refresh).seconds > refresh):
+        with st.spinner("Obteniendo datos..."):
+            _fetch_data()
+
+    tf_data  = st.session_state.tf_data
+    obi_data = st.session_state.obi_data
+    regime   = st.session_state.regime_data
+    cb: CircuitBreaker = st.session_state.circuit_breaker
+
+    # ── Routing de páginas ───────────────────────────────────────
+    if page == "📊 Dashboard":
+        _page_main(tf_data, obi_data, regime, cb)
+    elif page == "🎯 Circuit Breaker":
+        _page_circuit(cb)
+    elif page == "📐 Position Sizer":
+        _page_sizer(tf_data)
+    elif page == "🔬 Backtesting":
+        _page_backtest(tf_data)
+    elif page == "⚙️ Configuración":
+        _page_config()
+
+    # Auto-refresh
+    time.sleep(refresh)
+    st.rerun()
+
+
+def _page_main(tf_data, obi_data, regime, cb):
+    st.markdown('<div class="titanium-header">📊 Dashboard</div>', True)
+
+    # Fila superior: indicadores clave
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        df_e = tf_data.get(Config.TF_ENTRY, pd.DataFrame())
+        price = df_e['close'].iloc[-1] if not df_e.empty else 0
+        card("Precio BTC", f"${price:,.0f}",
+             sub=f"TF: {Config.TF_ENTRY}")
+    with c2:
+        obi_bar(obi_data.get('obi', 0))
+    with c3:
+        regime_card(regime)
+    with c4:
+        circuit_card(cb)
+
+    st.markdown("---")
+
+    # Velas por timeframe
+    for tf, df in tf_data.items():
+        if df.empty:
+            continue
+        with st.expander(f"📈 Timeframe {tf}", expanded=(tf == Config.TF_ENTRY)):
+            col_chart, col_stats = st.columns([3, 1])
+            with col_chart:
+                chart_df = df[['open','high','low','close','volume']].tail(50)
+                st.line_chart(chart_df['close'])
+            with col_stats:
+                last   = df.iloc[-1]
+                change = (df['close'].iloc[-1] / df['close'].iloc[-2] - 1) * 100
+                color  = "green" if change >= 0 else "red"
+                card("Último cierre",
+                     f"${last['close']:,.2f}",
+                     sub=f"{'▲' if change>=0 else '▼'} {change:+.2f}%",
+                     badge=color)
+
+                # RSI rápido
+                delta = df['close'].diff()
+                gain  = delta.where(delta>0,0).rolling(14).mean()
+                loss  = (-delta.where(delta<0,0)).rolling(14).mean()
+                rsi   = (100 - 100 / (1 + gain/loss.replace(0,1e-10))).iloc[-1]
+                rsi_b = "green" if 40<rsi<60 else "yellow" if 30<rsi<70 else "red"
+                card("RSI (14)", f"{rsi:.1f}",
+                     sub="Sobrecomprado" if rsi>70 else
+                         "Sobrevendido" if rsi<30 else "Neutro",
+                     badge=rsi_b)
+
+    # AI Sentiment
+    st.markdown("---")
+    st.markdown("### 🤖 AI Sentiment")
+    ai: AIBrain = st.session_state.ai_brain
+    if st.button("Analizar con Groq/Llama"):
+        with st.spinner("Consultando IA..."):
+            data = ai.analyze()
+        st.session_state.ai_data = data
+
+    ai_data = st.session_state.ai_data
+    if ai_data:
+        label = ai_data.get('label', 'NEUTRAL')
+        score = ai_data.get('score', 0)
+        summ  = ai_data.get('summary', '—')
+        color = "green" if label=="BULLISH" else "red" if label=="BEARISH" else "blue"
+        card(f"Sentimiento IA",
+             f"{label} ({score:+.2f})",
+             sub=summ, badge=color)
+
+
+def _page_circuit(cb: CircuitBreaker):
+    st.markdown('<div class="titanium-header">🎯 Circuit Breaker</div>', True)
+    st.caption("Protección automática contra pérdidas catastróficas.")
+
+    status = cb.get_status()
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        badge_c = "green" if status['can_trade'] else "red"
+        card("Estado", "ACTIVO" if status['can_trade'] else "PAUSADO",
+             badge=badge_c)
+    with c2:
+        card("PnL diario",
+             f"{status['daily_pnl_pct']:+.2f}%",
+             sub=f"Límite: -{Config.MAX_DAILY_DD}%",
+             badge="green" if status['daily_pnl_pct'] > -Config.MAX_DAILY_DD else "red")
+    with c3:
+        card("PnL total",
+             f"{status['total_pnl_pct']:+.2f}%",
+             sub=f"Límite: -{Config.MAX_TOTAL_DD}%",
+             badge="green" if status['total_pnl_pct'] > -Config.MAX_TOTAL_DD else "red")
+
+    st.markdown("---")
+    st.markdown("#### Simular trade (para pruebas)")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        sim_pnl = st.number_input("PnL del trade (%)", -10.0, 10.0, -1.5, 0.5)
+    with col_b:
+        st.write("")
+        st.write("")
+        if st.button("Registrar trade simulado"):
+            cb.record_trade(sim_pnl)
+            st.success(f"Trade registrado: {sim_pnl:+.1f}%")
+            st.rerun()
+
+    if status['pause_reason']:
+        st.error(f"🚨 Motivo de pausa: {status['pause_reason']}")
+
+    st.markdown("#### Configuración actual")
+    cfg_df = pd.DataFrame([{
+        "Parámetro": k, "Valor": v
+    } for k, v in {
+        "Max DD diario": f"{Config.MAX_DAILY_DD}%",
+        "Max DD total":  f"{Config.MAX_TOTAL_DD}%",
+        "Emergency stop": f"{Config.EMERGENCY_STOP}%",
+        "Max pérd. consec.": str(Config.MAX_CONS_LOSSES),
+        "Cooldown":      f"{Config.COOLDOWN_MIN} min",
+    }.items()])
+    st.dataframe(cfg_df, hide_index=True, use_container_width=True)
+
+
+def _page_sizer(tf_data):
+    st.markdown('<div class="titanium-header">📐 Position Sizer</div>', True)
+    st.caption("Calcula el tamaño óptimo de posición con Half-Kelly.")
+
+    ps: KellyPositionSizer = st.session_state.position_sizer
+    rm: ATRRiskManager     = st.session_state.risk_manager
+
+    c1, c2 = st.columns(2)
+    with c1:
+        balance   = st.number_input("Capital total (USD)", 100.0, 1e7, 10000.0, 100.0)
+        direction = st.selectbox("Dirección", ["long", "short"])
+    with c2:
+        df_e = tf_data.get(Config.TF_ENTRY, pd.DataFrame())
+        default_price = float(df_e['close'].iloc[-1]) if not df_e.empty else 65000.0
+        entry_price = st.number_input("Precio de entrada", 1.0, 1e8, default_price, 10.0)
+
+    if st.button("Calcular stops + tamaño", use_container_width=True):
+        if df_e.empty:
+            st.warning("Sin datos de velas disponibles")
         else:
-            st.info("⏳ Flat Position. Waiting for 8+ confluence factors...")
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("Current Price", f"${price:,.1f}")
-            s2.metric("Trend", d_trend, f"Strength: {d_strength:.0%}")
-            s3.metric("OBI Flow", f"{obi:+.3f}")
-            s4.metric("Volatility (ATR)", f"{atr:.1f}")
+            stops = rm.calculate_stops(entry_price, direction, df_e)
+            if stops:
+                sizing = ps.calculate(balance, entry_price, stops.stop_loss)
+                st.markdown("---")
+                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                with col_s1:
+                    card("Stop Loss",    f"${stops.stop_loss:,.2f}",
+                         sub=f"ATR: {stops.atr_value}", badge="red")
+                with col_s2:
+                    card("Take Profit",  f"${stops.take_profit:,.2f}",
+                         badge="green")
+                with col_s3:
+                    card("R:R Ratio",    f"{stops.risk_reward}x",
+                         badge=stops.confidence)
+                with col_s4:
+                    card("Posición",
+                         f"${sizing.get('position_usd', 0):,.0f}",
+                         sub=f"Riesgo: {sizing.get('risk_pct',0):.1f}%",
+                         badge="blue")
 
-    with col_risk:
-        st.subheader("🛡️ Risk Management")
-        if can_trade:
-            st.success("🟢 BREAKER: ARMED (Trading Active)")
+                method = sizing.get('method', 'default')
+                trades = sizing.get('trades', 0)
+                st.info(f"📊 Método: **{method}** — "
+                        f"basado en {trades} trades históricos. "
+                        f"{'Agrega más trades para activar Kelly completo.' if trades < 20 else 'Kelly activo.'}")
+            else:
+                st.warning("ATR no calculable con los datos actuales")
+
+    st.markdown("---")
+    stats = ps.stats()
+    if stats.get('trades', 0) > 0:
+        st.markdown("#### Estadísticas del historial")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            card("Win Rate",  f"{stats['win_rate']}%")
+        with c2:
+            card("Avg Win",   f"{stats['avg_win']:+.2f}%")
+        with c3:
+            card("Kelly %",   f"{stats['kelly_pct']:.1f}%")
+
+
+def _page_backtest(tf_data):
+    st.markdown('<div class="titanium-header">🔬 Backtesting</div>', True)
+    st.caption("Valida tu estrategia con datos históricos antes de arriesgar capital real.")
+
+    df = tf_data.get(Config.TF_TREND, pd.DataFrame())
+    if df.empty:
+        st.warning("Sin datos disponibles para backtest")
+        return
+
+    st.info(f"Dataset: **{len(df)} velas** del TF {Config.TF_TREND}")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        capital = st.number_input("Capital inicial (USD)", 1000.0, 1e6, 10000.0, 1000.0)
+        sl_mult = st.slider("Multiplicador SL (ATR x)", 1.0, 4.0, 2.0, 0.5)
+    with col_b:
+        tp_mult = st.slider("Multiplicador TP (ATR x)", 1.5, 6.0, 3.0, 0.5)
+        comm    = st.slider("Comisión (%)", 0.0, 0.5, 0.1, 0.05) / 100
+
+    if st.button("▶ Ejecutar Backtest", use_container_width=True):
+        rm_bt = ATRRiskManager(sl_mult=sl_mult, tp_mult=tp_mult)
+
+        # Estrategia simple: cruce EMA + RSI para el backtest demo
+        @dataclass
+        class DemoSignal:
+            direction: str
+            stop_loss: float
+            take_profit: float
+
+        def demo_strategy(hist):
+            if len(hist) < 50:
+                return None
+            close = hist['close']
+            ema20 = close.ewm(span=20).mean().iloc[-1]
+            ema50 = close.ewm(span=50).mean().iloc[-1]
+            delta = close.diff()
+            gain  = delta.where(delta>0,0).rolling(14).mean()
+            loss  = (-delta.where(delta<0,0)).rolling(14).mean()
+            rsi   = (100 - 100/(1+gain/loss.replace(0,1e-10))).iloc[-1]
+            price = close.iloc[-1]
+            stops = rm_bt.calculate_stops(price, 'long', hist)
+            if not stops:
+                return None
+            if ema20 > ema50 and rsi < 65:
+                return DemoSignal('long',  stops.stop_loss, stops.take_profit)
+            if ema20 < ema50 and rsi > 35:
+                return DemoSignal('short', stops.stop_loss, stops.take_profit)
+            return None
+
+        with st.spinner("Ejecutando backtest..."):
+            bt   = Backtester(commission=comm, initial_capital=capital)
+            res  = bt.run(df, demo_strategy)
+
+        st.markdown("---")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            badge = "green" if res.total_return_pct > 0 else "red"
+            card("Retorno Total", f"{res.total_return_pct:+.1f}%", badge=badge)
+        with c2:
+            card("Max Drawdown", f"{res.max_drawdown_pct:.1f}%",
+                 badge="green" if res.max_drawdown_pct < 20 else "red")
+        with c3:
+            card("Sharpe Ratio", f"{res.sharpe_ratio:.2f}",
+                 badge="green" if res.sharpe_ratio > 1.5 else "yellow")
+        with c4:
+            card("Profit Factor", f"{res.profit_factor:.2f}",
+                 badge="green" if res.profit_factor > 1.5 else "red")
+
+        c5, c6, c7 = st.columns(3)
+        with c5:
+            card("Win Rate",  f"{res.win_rate_pct:.0f}%")
+        with c6:
+            card("Trades",    str(res.total_trades))
+        with c7:
+            card("Sortino",   f"{res.sortino_ratio:.2f}")
+
+        if res.equity_curve:
+            st.markdown("#### Curva de equity")
+            eq_df = pd.DataFrame({'Equity': res.equity_curve})
+            st.line_chart(eq_df)
+
+        # Juicio automático
+        st.markdown("---")
+        if res.sharpe_ratio >= 1.5 and res.profit_factor >= 1.5 \
+           and res.max_drawdown_pct <= 20:
+            st.success("✅ Estrategia válida para live trading (métricas institucionales)")
+        elif res.profit_factor < 1.0:
+            st.error("❌ Estrategia NO rentable — NO operar con capital real")
         else:
-            st.error(f"🔴 BREAKER: TRIPPED ({cb.get('pause_reason', '?')})")
-            
-        r1, r2, r3, r4 = st.columns(4)
-        daily = cb.get('daily_pnl_pct', 0)
-        total = cb.get('total_pnl_pct', 0)
-        wr = ks.get('win_rate', 0)
-        kelly = ks.get('kelly_pct', config.MIN_POSITION_PCT * 100)
-        
-        r1.metric("Daily P&L", f"{daily:+.2f}%")
-        r2.metric("Total Equity", f"{total:+.2f}%")
-        r3.metric("Win Rate", f"{wr:.0f}%")
-        r4.metric("Kelly Size", f"{kelly:.1f}%")
+            st.warning("⚠️ Estrategia marginal — ajusta parámetros antes de live")
 
-    st.divider()
 
-    # -- ROW 2: FULL WIDTH CHART --
-    st.subheader("📊 Market Action")
-    if entry_df is not None and len(entry_df) > 10:
-        fig = go.Figure()
+def _page_config():
+    st.markdown('<div class="titanium-header">⚙️ Configuración</div>', True)
 
-        fig.add_trace(go.Candlestick(
-            x=entry_df['time'], open=entry_df['open'],
-            high=entry_df['high'], low=entry_df['low'], close=entry_df['close'],
-            increasing_line_color='#4ade80', decreasing_line_color='#f87171',
-            increasing_fillcolor='rgba(34,197,94,0.3)', decreasing_fillcolor='rgba(239,68,68,0.3)',
-            name='BTC/USDT'
-        ))
+    tab_keys, tab_risk = st.tabs(["🔑 API Keys", "⚠️ Risk Settings"])
 
-        if 'EMA_FAST' in entry_df.columns:
-            fig.add_trace(go.Scatter(x=entry_df['time'], y=entry_df['EMA_FAST'], line=dict(color='#60a5fa', width=1.5), name=f'EMA {config.EMA_FAST}', opacity=0.8))
-            fig.add_trace(go.Scatter(x=entry_df['time'], y=entry_df['EMA_MID'], line=dict(color='#a78bfa', width=1.5), name=f'EMA {config.EMA_MID}', opacity=0.8))
-            fig.add_trace(go.Scatter(x=entry_df['time'], y=entry_df['EMA_SLOW'], line=dict(color='#f472b6', width=1.5), name=f'EMA {config.EMA_SLOW}', opacity=0.8))
+    with tab_keys:
+        st.caption("Tus llaves se guardan localmente. Nunca se envían a terceros.")
+        username = st.session_state.username
+        curr_key, curr_sec = st.session_state.auth.get_keys(username)
 
-        if 'BB_upper' in entry_df.columns:
-            fig.add_trace(go.Scatter(x=entry_df['time'], y=entry_df['BB_upper'], line=dict(color='rgba(148,163,184,0.3)', width=1, dash='dot'), name='BB Upper', showlegend=False))
-            fig.add_trace(go.Scatter(x=entry_df['time'], y=entry_df['BB_lower'], line=dict(color='rgba(148,163,184,0.3)', width=1, dash='dot'), name='BB Lower', fill='tonexty', fillcolor='rgba(148,163,184,0.04)', showlegend=False))
+        new_key = st.text_input("Binance API Key",
+                                value=curr_key or "",
+                                type="password")
+        new_sec = st.text_input("Binance Secret",
+                                value=curr_sec or "",
+                                type="password")
 
-        if active_signal:
-            fig.add_hline(y=active_signal.entry, line_dash="dash", line_color="#facc15", line_width=1, annotation_text=f"Entry: {active_signal.entry:,.1f}")
-            fig.add_hline(y=active_signal.stop_loss, line_dash="dash", line_color="#f87171", line_width=1, annotation_text=f"SL: {active_signal.stop_loss:,.1f}")
-            fig.add_hline(y=active_signal.take_profit, line_dash="dash", line_color="#4ade80", line_width=1, annotation_text=f"TP: {active_signal.take_profit:,.1f}")
+        if st.button("💾 Guardar llaves", use_container_width=True):
+            st.session_state.auth.save_keys(username, new_key, new_sec)
+            st.session_state.initialized = False  # Fuerza reconexión
+            st.success("✅ Llaves guardadas — reconectando al exchange")
+            st.rerun()
 
-        # Premium Plotly Tweaks
-        fig.update_layout(
-            template='plotly_dark',
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(10,15,30,0.6)',
-            height=550,
-            margin=dict(l=5, r=5, t=15, b=5),
-            xaxis=dict(gridcolor='rgba(255,255,255,0.03)', rangeslider=dict(visible=False), showline=False),
-            yaxis=dict(gridcolor='rgba(255,255,255,0.03)', side='right', showline=False),
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, font=dict(size=12, family="JetBrains Mono")),
-        )
-        st.plotly_chart(fig, use_container_width=True, key="main_chart")
+        if st.button("🗑️ Eliminar llaves (volver a DEMO)",
+                     use_container_width=True):
+            st.session_state.auth.save_keys(username, '', '')
+            st.session_state.initialized = False
+            st.warning("Llaves eliminadas — modo DEMO activado")
+            st.rerun()
 
-    st.divider()
+    with tab_risk:
+        st.caption("Configura mediante variables de entorno en Railway para persistencia.")
+        st.code("""
+# Variables de entorno Railway:
+MAX_DAILY_DD=5.0       # % pérdida máxima diaria
+MAX_TOTAL_DD=15.0      # % pérdida máxima total
+EMERGENCY_STOP=-20.0   # % stop definitivo
+MAX_CONS_LOSSES=5      # pérdidas consecutivas máximas
+COOLDOWN_MIN=60        # minutos de pausa forzada
+KELLY_FRACTION=0.5     # 0.5 = Half-Kelly (recomendado)
+MAX_POSITION_PCT=0.10  # máximo 10% del capital por trade
+        """, language="bash")
 
-    # -- ROW 3: CONFLUENCE INTEL --
-    st.subheader("🧮 Confluence Engine Details")
-    c_left, c_right = st.columns([2, 1])
-    
-    with c_left:
-        st.write("**Real-Time Signal Score**")
-        pcol1, pcol2 = st.columns(2)
-        with pcol1:
-            st.progress(min(long_s, 100), text=f"🟢 LONG: {long_s}/100")
-        with pcol2:
-            st.progress(min(short_s, 100), text=f"🔴 SHORT: {short_s}/100")
-            
-        bd = long_bd if long_s >= short_s else short_bd
-        if bd:
-            cols = st.columns(4)
-            for i, (k, (sc, mx)) in enumerate(bd.items()):
-                icon = '✅' if sc >= mx * 0.6 else ('⚠️' if sc > 0 else '❌')
-                cols[i % 4].caption(f"{icon} **{k}**: {sc}/{mx}")
-                
-    with c_right:
-        st.write("**Pattern Recognition**")
-        i1, i2 = st.columns(2)
-        mkt_s = last.get('market_structure', 'RANGING')
-        rsi_div = last.get('rsi_divergence', 'NONE')
-        
-        i1.metric("Macro Trend", m_trend.replace('MACRO_', ''))
-        i2.metric("Micro Struct", mkt_s.replace('_STRUCT', '').replace('_', ' '))
-        
-        c_mac1, c_mac2 = st.columns(2)
-        c_mac1.metric("MACD Core", f"{abs(mh):.1f} {'▲' if mh > 0 else '▼'}")
-        c_mac2.metric("RSI State", f"{rsi:.1f}")
-        
-        if rsi_div != 'NONE':
-            st.caption(f"⚡ Smart Divergence spotted: **{rsi_div}**")
+        st.markdown("#### Estado actual del Kelly Sizer")
+        ps: KellyPositionSizer = st.session_state.position_sizer
+        stats = ps.stats()
+        st.json(stats)
 
-st.divider()
 
-# ══════════════════════════════════════════════════════════
-# TABS: HISTORY & BACKTESTING
-# ══════════════════════════════════════════════════════════
-tab1, tab2 = st.tabs(["📋 Trade History", "🧪 Backtesting Engine"])
+# ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 16: MAIN
+# ═══════════════════════════════════════════════════════════════════
 
-with tab1:
-    history = list(strategy.signal_history)
-    if history:
-        h_data = []
-        for sig in history[-15:]:
-            h_data.append({
-                'Time': sig.timestamp.astimezone(tz).strftime('%H:%M:%S'),
-                'Dir': f"{'🟢' if sig.direction == 'LONG' else '🔴'} {sig.direction}",
-                'Score': sig.score,
-                'Entry': f"${sig.entry:,.1f}",
-                'SL': f"${sig.stop_loss:,.1f}",
-                'TP': f"${sig.take_profit:,.1f}",
-                'R:R': f"1:{sig.risk_reward:.1f}",
-                'Status': sig.status,
-            })
-        st.dataframe(pd.DataFrame(h_data), hide_index=True, use_container_width=True)
+def main():
+    st.set_page_config(
+        page_title    = "Titanium Pro v9",
+        page_icon     = "⚡",
+        layout        = "wide",
+        initial_sidebar_state = "expanded",
+    )
+    st.markdown(STYLES, unsafe_allow_html=True)
+    _init_session()
+
+    if not st.session_state.logged_in:
+        page_login()
     else:
-        st.info("No trades executed yet in this session.")
+        page_dashboard()
 
-with tab2:
-    bt_col1, bt_col2, bt_col3, bt_col4 = st.columns(4)
-    with bt_col1:
-        bt_bars = st.number_input("Barras a Evaluar", min_value=500, max_value=10000,
-                                   value=3000, step=500, key="bt_bars")
-    with bt_col2:
-        bt_threshold = st.number_input("Score mínimo (Confluencia)", min_value=20, max_value=90,
-                                        value=65, step=5, key="bt_threshold")
-    with bt_col3:
-        bt_tp = st.number_input("ATR Take Profit Mult", min_value=1.0, max_value=5.0,
-                                 value=2.5, step=0.5, key="bt_tp")
-    with bt_col4:
-        bt_sl = st.number_input("ATR Stop Loss Mult", min_value=0.5, max_value=3.0,
-                                 value=1.5, step=0.5, key="bt_sl")
 
-    if st.button("🚀 Run Institutional Backtest", key="run_bt", type="primary"):
-        with st.spinner("Compiling Synthetic Data & Running Matrix..."):
-            from backtest import TitaniumBacktester, MonteCarloSimulator, generate_test_data
-
-            data = generate_test_data(int(bt_bars))
-            bt = TitaniumBacktester(initial_capital=10000)
-            result = bt.run(data, int(bt_threshold), bt_tp, bt_sl)
-            mc = MonteCarloSimulator(500)
-            mc_result = mc.analyze(result['returns'])
-
-            st.session_state['bt_result'] = result
-            st.session_state['mc_result'] = mc_result
-
-    if 'bt_result' in st.session_state:
-        result = st.session_state['bt_result']
-        mc_result = st.session_state['mc_result']
-        m = result['metrics']
-
-        st.markdown("### 📊 Strategy Performance")
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
-        m1.metric("Return Total", f"{m['total_return']:+.2f}%")
-        m2.metric("Sharpe Ratio", f"{m['sharpe_ratio']:.3f}")
-        m3.metric("Sortino Ratio", f"{m['sortino_ratio']:.3f}")
-        m4.metric("Max Drawdown", f"{m['max_drawdown']:.2f}%")
-        m5.metric("Win Rate", f"{m['win_rate']:.1f}%")
-        m6.metric("Profit Factor", f"{m['profit_factor']:.2f}")
-
-        eq = result['equity']
-        fig_eq = go.Figure()
-        fig_eq.add_trace(go.Scatter(
-            x=list(range(len(eq))), y=eq.values,
-            fill='tozeroy', fillcolor='rgba(96,165,250,0.1)',
-            line=dict(color='#60a5fa', width=2),
-            name='Equity'
-        ))
-        fig_eq.add_hline(y=10000, line_dash="dash", line_color="#94a3b8", annotation_text="Capital Base: $10,000")
-        fig_eq.update_layout(
-            template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(17,24,39,0.8)',
-            height=300, margin=dict(l=10, r=10, t=30, b=10), yaxis=dict(gridcolor='rgba(255,255,255,0.04)'), xaxis=dict(gridcolor='rgba(255,255,255,0.04)')
-        )
-        st.plotly_chart(fig_eq, use_container_width=True)
-
-        st.markdown("### 🎲 Monte Carlo Stress Test (500 Sims)")
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Expected Return", f"{mc_result['expected_return']:+.2f}%")
-        mc2.metric("P(Loss)", f"{mc_result['probability_of_loss']:.1f}%")
-        mc3.metric("Expected Drawdown", f"{mc_result['expected_max_dd']:.2f}%")
-        mc4.metric("Worst Case DD", f"{mc_result['worst_case_dd']:.2f}%")
-        st.caption(f"95% Confidence Interval: [{mc_result['return_ci_low']:+.2f}%, {mc_result['return_ci_high']:+.2f}%]")
-
+if __name__ == "__main__":
+    main()
