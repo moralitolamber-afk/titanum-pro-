@@ -4,11 +4,16 @@ import subprocess
 import shutil
 
 def main():
-    print("🚀 TITANIUM PRO — Iniciando Motor Python...")
+    # Detectar la ruta absoluta del script para evitar errores de directorio (CWD)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(base_dir) # Cambiar al directorio del proyecto automáticamente
     
-    # 1. Rutas
-    venv_path = os.path.join(os.getcwd(), ".venv")
-    requirements = "requirements.txt"
+    print(f"🚀 TITANIUM PRO — Iniciando Motor Python en {base_dir}...")
+    
+    # 1. Rutas locales
+    venv_path = os.path.join(base_dir, ".venv")
+    requirements = os.path.join(base_dir, "requirements.txt")
+    app_script = os.path.join(base_dir, "app.py")
     
     # 2. Crear VENV si no existe
     if not os.path.exists(venv_path):
@@ -30,7 +35,7 @@ def main():
     # 5. Lanzar Terminal Bloomberg
     print("[✓] Lanzando Terminal en http://localhost:8501")
     try:
-        subprocess.run([streamlit_exe, "run", "app.py"])
+        subprocess.run([streamlit_exe, "run", app_script])
     except KeyboardInterrupt:
         print("\n[!] Terminal detenida por el usuario.")
 
