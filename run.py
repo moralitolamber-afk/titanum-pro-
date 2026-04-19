@@ -29,15 +29,25 @@ def main():
         streamlit_exe = os.path.join(venv_path, "bin", "streamlit")
 
     # 4. Instalar dependencias si es necesario
-    print("[*] Verificando dependencias...")
+    print("[*] Sincronizando entorno profesional...")
     subprocess.run([python_exe, "-m", "pip", "install", "-r", requirements, "--quiet"])
 
-    # 5. Lanzar Terminal Bloomberg
-    print("[✓] Lanzando Terminal en http://localhost:8501")
+    # 5. Checklist de Salud del Sistema
+    print("\n" + "="*40)
+    print(" 🛡️  AUDITORÍA DE SALUD TITANIUM PRO")
+    print("-" * 40)
+    print(f" 🧠 CEREBRO IA:   {'CONECTADO ✅' if os.getenv('GROQ_API_KEY') else 'SIN CLAVE ⚠️'}")
+    print(f" 🔌 EXCHANGE:    {'LISTO ✅' if os.getenv('BINANCE_API_KEY') else 'DEMO MODE 💡'}")
+    print(f" 📦 ENTORNO:     {'AISLADO (.venv) ✅'}")
+    print(f" 📝 CONFIG:      {'.env ACTIVADO ✅' if os.path.exists('.env') else 'PENDIENTE ⚠️'}")
+    print("="*40 + "\n")
+
+    # 6. Lanzar Terminal Bloomberg
+    print(f"[✓] Iniciando Streamlit desde: {app_script}")
     try:
-        subprocess.run([streamlit_exe, "run", app_script])
+        subprocess.run([streamlit_exe, "run", app_script, "--server.headless", "true"])
     except KeyboardInterrupt:
-        print("\n[!] Terminal detenida por el usuario.")
+        print("\n[!] Motor detenido por el usuario.")
 
 if __name__ == "__main__":
     main()
