@@ -1,5 +1,6 @@
-streamlit==1.32.0
-pandas==2.2.0
-numpy==1.26.4
+streamlit==1.45.0
+pandas==2.2.3
+numpy==2.2.5
 ccxt==4.3.89
 groq
+pillow>=11.2.1
