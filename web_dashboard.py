@@ -68,6 +68,31 @@ class Config:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# SECCIÓN 1.5: INDICADORES MANUALES
+# ═══════════════════════════════════════════════════════════════════
+
+def ema(series, length=14):
+    """Media Móvil Exponencial manual."""
+    return series.ewm(span=length, adjust=False).mean()
+
+def rsi(series, length=14):
+    """Índice de Fuerza Relativa manual."""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
+    rs = gain / loss.replace(0, 1e-10)
+    return 100 - (100 / (1 + rs))
+
+def atr(df, length=14):
+    """Average True Range manual (simplificado)."""
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(window=length).mean()
+
+
+# ═══════════════════════════════════════════════════════════════════
 # SECCIÓN 2: CIRCUIT BREAKER
 # ═══════════════════════════════════════════════════════════════════
 
@@ -208,12 +233,7 @@ class ATRRiskManager:
         if len(df) < self.atr_period + 1:
             return None
         try:
-            tr = pd.concat([
-                df['high'] - df['low'],
-                (df['high'] - df['close'].shift()).abs(),
-                (df['low']  - df['close'].shift()).abs(),
-            ], axis=1).max(axis=1)
-            return float(tr.rolling(self.atr_period).mean().iloc[-1])
+            return float(atr(df, self.atr_period).iloc[-1])
         except Exception:
             return None
 
@@ -307,19 +327,12 @@ class RegimeDetector:
             high  = df['high']
             low   = df['low']
 
-            # ADX simplificado
-            delta  = close.diff()
-            gain   = delta.where(delta > 0, 0).rolling(14).mean()
-            loss   = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi    = 100 - (100 / (1 + gain / loss.replace(0, 1e-10)))
-
-            tr     = pd.concat([
-                high - low,
-                (high - close.shift()).abs(),
-                (low  - close.shift()).abs(),
-            ], axis=1).max(axis=1)
-            atr    = tr.rolling(14).mean().iloc[-1]
-            atr_pct = atr / close.iloc[-1] * 100
+            # Indicadores manuales
+            rsi_vals = rsi(close, 14)
+            atr_vals = atr(df, 14)
+            
+            atr_val = atr_vals.iloc[-1]
+            atr_pct = atr_val / close.iloc[-1] * 100
 
             # Bollinger Width
             sma    = close.rolling(20).mean()
@@ -327,9 +340,9 @@ class RegimeDetector:
             bb_w   = (std.iloc[-1] * 4) / sma.iloc[-1] * 100
 
             # EMA alignment
-            ema20  = close.ewm(span=20).mean().iloc[-1]
-            ema50  = close.ewm(span=50).mean().iloc[-1]
-            ema200 = close.ewm(span=200).mean().iloc[-1]
+            ema20  = ema(close, 20).iloc[-1]
+            ema50  = ema(close, 50).iloc[-1]
+            ema200 = ema(close, 200).iloc[-1]
             aligned = (close.iloc[-1] > ema20 > ema50 > ema200) or \
                       (close.iloc[-1] < ema20 < ema50 < ema200)
 
@@ -361,7 +374,7 @@ class RegimeDetector:
                 "confidence":   round(conf, 2),
                 "atr_pct":      round(atr_pct, 2),
                 "bb_width":     round(bb_w, 2),
-                "rsi":          round(rsi.iloc[-1], 1),
+                "rsi":          round(rsi_vals.iloc[-1], 1),
                 "ema_aligned":  aligned,
                 "should_trade": should_trade,
             }
@@ -1322,15 +1335,12 @@ def _page_main(tf_data, obi_data, regime, cb):
                      sub=f"{'▲' if change>=0 else '▼'} {change:+.2f}%",
                      badge=color)
 
-                # RSI rápido
-                delta = df['close'].diff()
-                gain  = delta.where(delta>0,0).rolling(14).mean()
-                loss  = (-delta.where(delta<0,0)).rolling(14).mean()
-                rsi   = (100 - 100 / (1 + gain/loss.replace(0,1e-10))).iloc[-1]
-                rsi_b = "green" if 40<rsi<60 else "yellow" if 30<rsi<70 else "red"
-                card("RSI (14)", f"{rsi:.1f}",
-                     sub="Sobrecomprado" if rsi>70 else
-                         "Sobrevendido" if rsi<30 else "Neutro",
+                # RSI rápido manual
+                val_rsi = rsi(df['close'], 14).iloc[-1]
+                rsi_b   = "green" if 40<val_rsi<60 else "yellow" if 30<val_rsi<70 else "red"
+                card("RSI (14)", f"{val_rsi:.1f}",
+                     sub="Sobrecomprado" if val_rsi>70 else
+                         "Sobrevendido" if val_rsi<30 else "Neutro",
                      badge=rsi_b)
 
     # AI Sentiment
@@ -1664,19 +1674,16 @@ def _page_backtest(tf_data):
             if len(hist) < 50:
                 return None
             close = hist['close']
-            ema20 = close.ewm(span=20).mean().iloc[-1]
-            ema50 = close.ewm(span=50).mean().iloc[-1]
-            delta = close.diff()
-            gain  = delta.where(delta>0,0).rolling(14).mean()
-            loss  = (-delta.where(delta<0,0)).rolling(14).mean()
-            rsi   = (100 - 100/(1+gain/loss.replace(0,1e-10))).iloc[-1]
+            ema20 = ema(close, 20).iloc[-1]
+            ema50 = ema(close, 50).iloc[-1]
+            val_rsi = rsi(close, 14).iloc[-1]
             price = close.iloc[-1]
             stops = rm_bt.calculate_stops(price, 'long', hist)
             if not stops:
                 return None
-            if ema20 > ema50 and rsi < 65:
+            if ema20 > ema50 and val_rsi < 65:
                 return DemoSignal('long',  stops.stop_loss, stops.take_profit)
-            if ema20 < ema50 and rsi > 35:
+            if ema20 < ema50 and val_rsi > 35:
                 return DemoSignal('short', stops.stop_loss, stops.take_profit)
             return None
 
