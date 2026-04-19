@@ -1,6 +1,9 @@
 # Secretos y APIs
 .env
 users_db.json
+users.json
+.streamlit/
+
 *.key
 
 # Python
