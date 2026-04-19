@@ -15,6 +15,10 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
+
+# Cargar variables locales si existen (.env)
+load_dotenv()
 
 warnings.filterwarnings('ignore')
 
