@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# ✅ CRÍTICO: usar $PORT dinámico de Railway, NO hardcodeado
+# ✅ Usando el puerto dinámico de Railway
 CMD streamlit run web_dashboard.py \
     --server.port=${PORT:-8501} \
     --server.address=0.0.0.0 \
