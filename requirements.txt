@@ -1,7 +1,0 @@
-streamlit==1.45.0
-pandas==2.2.3
-numpy==2.2.5
-ccxt==4.3.89
-groq
-python-dotenv
-pillow>=11.2.1
